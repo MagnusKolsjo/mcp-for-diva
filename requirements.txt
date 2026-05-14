@@ -1,0 +1,18 @@
+# Basuppsättning (ingår i ~/MCP-Servers/.venv)
+mcp
+psycopg2-binary
+python-dotenv
+requests
+httpx
+beautifulsoup4
+
+# PDF-extraktion (kontrollera om redan installerat från ström 4/9)
+pymupdf
+pymupdf4llm
+
+# HTTP-transport (kontrollera om redan installerat)
+starlette
+uvicorn
+
+# OCR-fallback (systempaket krävs: brew install tesseract tesseract-lang)
+# ocrmypdf
