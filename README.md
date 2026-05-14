@@ -1,4 +1,4 @@
-# MCP-server för DiVA-Portal
+# MCP-server för DiVA
 
 MCP-server (Model Context Protocol) för sökning i DiVA — Digitala Vetenskapliga Arkivet. Ger MCP-kompatibla AI-verktyg tillgång till ~1,5 miljoner vetenskapliga publikationer från ~50 svenska lärosäten och myndigheter.
 
