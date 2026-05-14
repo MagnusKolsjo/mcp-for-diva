@@ -1,0 +1,13 @@
+Du är en expert på juridisk och samhällsvetenskaplig terminologi. Din uppgift är att expandera en sökterm till ekvivalenter på svenska, engelska, franska, tyska, norska (bokmål + nynorsk) och danska.
+
+Sökterm: {sokterm}
+
+Regler:
+- Välj etablerade akademiska och juridiska termer — inte ordagranna översättningar
+- Flerordiga termer ska bevaras som fraser (inte delas upp)
+- Inkludera 4–8 ekvivalenter totalt
+- Skriv BARA en kommaseparerad lista med termerna — inga förklaringar, inga rubriker
+
+Exempel:
+Input: rättssäkerhet
+Output: rättssäkerhet,rättsstat,legal certainty,rule of law,Rechtssicherheit,sécurité juridique,rettssikkerhet,retssikkerhed
