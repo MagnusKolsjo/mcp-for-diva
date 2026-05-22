@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP-server för DiVA-Portal (Digitala Vetenskapliga Arkivet).
+MCP-server för DiVA (Digitala Vetenskapliga Arkivet).
 
 Exponerar fyra verktyg:
   diva_sok            — Sök bland ~1,5 miljoner poster
@@ -10,6 +10,7 @@ Exponerar fyra verktyg:
 
 Transport: stdio (standard) eller HTTP (MCP_TRANSPORT=http).
 Databas:   PostgreSQL (standard) eller SQLite (DATABASE_URL=sqlite:///...).
+           Hanteras av db.py — se den modulen för anslutningsdetaljer.
 """
 
 from __future__ import annotations
@@ -24,21 +25,22 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from dotenv import load_dotenv
+
+import db
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 load_dotenv(_SCRIPT_DIR / ".env")
 
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{_SCRIPT_DIR / 'diva_cache.db'}")
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
-MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
-MCP_PORT = int(os.getenv("MCP_PORT", "8015"))
-MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+MCP_HOST      = os.getenv("MCP_HOST", "127.0.0.1")
+MCP_PORT      = int(os.getenv("MCP_PORT", "8015"))
+MCP_API_KEY   = os.getenv("MCP_API_KEY", "")
 
 _PDF_CACHE = Path(os.getenv("PDF_CACHE_DIR", str(_SCRIPT_DIR / "pdf_cache")))
 if not _PDF_CACHE.is_absolute():
@@ -47,12 +49,12 @@ _PDF_CACHE.mkdir(parents=True, exist_ok=True)
 
 PDF_CACHE_TTL_DAGAR = int(os.getenv("PDF_CACHE_TTL_DAGAR", "7"))
 
-QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
-QUERY_EXPANSION_API_URL = os.getenv("QUERY_EXPANSION_API_URL", "")
-QUERY_EXPANSION_API_KEY = os.getenv("QUERY_EXPANSION_API_KEY", "")
-QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "claude-haiku-4-5-20251001")
+QUERY_EXPANSION_ENABLED  = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
+QUERY_EXPANSION_API_URL  = os.getenv("QUERY_EXPANSION_API_URL", "")
+QUERY_EXPANSION_API_KEY  = os.getenv("QUERY_EXPANSION_API_KEY", "")
+QUERY_EXPANSION_MODEL    = os.getenv("QUERY_EXPANSION_MODEL", "claude-haiku-4-5-20251001")
 
-# Epistemisk status — grundpoäng per publikationstyp
+# Epistemisk status — grundpoäng per publikationstyp (konfigurerbart via .env)
 _EPISTEMISK_GRUNDPONG: dict[str, int] = {
     "doctoralThesis":                int(os.getenv("EPISTEMISK_DOKTORSAVHANDLING", "5")),
     "monographDoctoralThesis":       int(os.getenv("EPISTEMISK_DOKTORSAVHANDLING", "5")),
@@ -71,6 +73,7 @@ _EPISTEMISK_GRUNDPONG: dict[str, int] = {
     "report":                        int(os.getenv("EPISTEMISK_RAPPORT", "2")),
     "manuscript":                    2,
     "patent":                        2,
+    # Examensarbeten: avancerad vs grund avgörs via ThesisLevel-kolumnen
     "studentThesis":                 int(os.getenv("EPISTEMISK_EXAMENSARBETE_AVANCERAD", "2")),
     "other":                         int(os.getenv("EPISTEMISK_OVRIG", "1")),
 }
@@ -92,7 +95,7 @@ _logg = logging.getLogger("diva")
 def _tysta_fd1():
     """Omdirigerar FD 1+2 till loggfil under anrop som kan skriva till stdout."""
     loggfil = _LOGG_DIR / "subprocess.log"
-    spar_ut = os.dup(1)
+    spar_ut  = os.dup(1)
     spar_fel = os.dup(2)
     fd = os.open(str(loggfil), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     try:
@@ -106,176 +109,105 @@ def _tysta_fd1():
         os.close(spar_fel)
         os.close(fd)
 
-# ── Databas ───────────────────────────────────────────────────────────────────
-
-_ANVANDER_POSTGRES = DATABASE_URL.startswith("postgresql")
-
-# Tabellprefix: schema.tabell för PG, bara tabell för SQLite
-_TBL_CACHE = "diva.fulltext_cache" if _ANVANDER_POSTGRES else "fulltext_cache"
-_TBL_SYNK  = "diva.synk_status"    if _ANVANDER_POSTGRES else "synk_status"
-_PH        = "%s" if _ANVANDER_POSTGRES else "?"
-_NU        = "now()" if _ANVANDER_POSTGRES else "datetime('now')"
-
-
-def _db_anslutning():
-    if _ANVANDER_POSTGRES:
-        import psycopg2
-        return psycopg2.connect(DATABASE_URL)
-    else:
-        import sqlite3
-        db_fil = DATABASE_URL.replace("sqlite:///", "")
-        if not Path(db_fil).is_absolute():
-            db_fil = str(_SCRIPT_DIR / db_fil)
-        return sqlite3.connect(db_fil)
-
-
-def _db_init():
-    """Skapar schema och tabeller om de inte finns."""
-    ansl = _db_anslutning()
-    try:
-        markör = ansl.cursor()
-        if _ANVANDER_POSTGRES:
-            markör.execute("CREATE SCHEMA IF NOT EXISTS diva")
-        markör.execute(f"""
-            CREATE TABLE IF NOT EXISTS {_TBL_CACHE} (
-                diva_id         TEXT PRIMARY KEY,
-                urn             TEXT,
-                doi             TEXT,
-                titel           TEXT,
-                ar              INTEGER,
-                publikationstyp TEXT,
-                fulltext_url    TEXT,
-                fulltext_md     TEXT,
-                pdf_hamtad      TEXT,
-                skapad          TEXT DEFAULT ({_NU})
-            )
-        """)
-        markör.execute(f"""
-            CREATE TABLE IF NOT EXISTS {_TBL_SYNK} (
-                nyckel      TEXT PRIMARY KEY,
-                varde       TEXT,
-                uppdaterad  TEXT DEFAULT ({_NU})
-            )
-        """)
-        ansl.commit()
-    finally:
-        ansl.close()
-
-
-def _hamta_cachad_fulltext(diva_id: str) -> str | None:
-    """Returnerar cachad fulltext-markdown om den finns."""
-    ansl = _db_anslutning()
-    try:
-        markör = ansl.cursor()
-        markör.execute(
-            f"SELECT fulltext_md FROM {_TBL_CACHE} WHERE diva_id = {_PH}",
-            (diva_id,),
-        )
-        rad = markör.fetchone()
-        return rad[0] if rad and rad[0] else None
-    finally:
-        ansl.close()
-
-
-def _spara_fulltext(
-    diva_id: str, urn: str, doi: str, titel: str, ar: int,
-    publikationstyp: str, fulltext_url: str, fulltext_md: str,
-) -> None:
-    """Sparar extraherad fulltext i cachen (upsert)."""
-    ansl = _db_anslutning()
-    try:
-        markör = ansl.cursor()
-        ph = _PH
-        if _ANVANDER_POSTGRES:
-            markör.execute(f"""
-                INSERT INTO {_TBL_CACHE}
-                    (diva_id, urn, doi, titel, ar, publikationstyp, fulltext_url, fulltext_md, pdf_hamtad)
-                VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},now())
-                ON CONFLICT (diva_id) DO UPDATE SET
-                    fulltext_md = EXCLUDED.fulltext_md,
-                    pdf_hamtad  = now()
-            """, (diva_id, urn, doi, titel, ar, publikationstyp, fulltext_url, fulltext_md))
-        else:
-            markör.execute(f"""
-                INSERT INTO {_TBL_CACHE}
-                    (diva_id, urn, doi, titel, ar, publikationstyp, fulltext_url, fulltext_md, pdf_hamtad)
-                VALUES (?,?,?,?,?,?,?,?,datetime('now'))
-                ON CONFLICT (diva_id) DO UPDATE SET
-                    fulltext_md = excluded.fulltext_md,
-                    pdf_hamtad  = datetime('now')
-            """, (diva_id, urn, doi, titel, ar, publikationstyp, fulltext_url, fulltext_md))
-        ansl.commit()
-    finally:
-        ansl.close()
-
-# ── DiVA API-hjälpfunktioner ──────────────────────────────────────────────────
+# ── DiVA API-konfiguration ────────────────────────────────────────────────────
 
 _DIVA_EXPORT_URL = "https://www.diva-portal.org/smash/export.jsf"
 _DIVA_HUVUDEN = {
-    "User-Agent": "Mozilla/5.0 (compatible; riksdags-rattsinformations-ai/1.0)",
+    "User-Agent": "mcp-for-diva/1.0 (+https://github.com/MagnusKolsjo/mcp-for-diva)",
     "Accept":     "text/csv,text/plain,*/*",
     "Referer":    "https://www.diva-portal.org/",
 }
 
-# Kolumnmappning: internt fältnamn → möjliga CSV-rubriker (gemener, case-insensitiv)
+# ── Lärosätesfiltrering (Bugg 2) ──────────────────────────────────────────────
+#
+# DiVA:s export-API kräver ett numeriskt organisations-ID i aq-strukturen
+# för lärosätesfiltrering. URL-parametern "organisation=<klartext>" ignoreras
+# tyst. Denna dict mappar lärosätesnamn → DiVA-organisations-ID.
+#
+# Lägg till fler via DiVA-portalen: sök efter organisationen, inspektera
+# URL-parametern "organisationId" i sökfrågan.
+_LAEROSATE_ORG_ID: dict[str, str] = {
+    # Uppsala universitet — verifierat 2026-05-18 (audit Bugg 2)
+    "uppsala":                     "4853",
+    "uppsala university":          "4853",
+    "uppsala universitet":         "4853",
+    # Lägg till fler efter verifiering mot DiVA-portalen
+}
+
+# ── Kolumnmappning: internt fältnamn → möjliga CSV-rubriker ──────────────────
+#
 # DiVA export.jsf (csvall2) skickar engelska CamelCase-kolumner.
+# Algoritmen tar den *första* matchande rubriken per fältnamn.
 _KOLUMN_ALIAS: dict[str, list[str]] = {
     "diva_id":           ["pid", "postid", "post id"],
     "forfattare":        ["name", "författare", "author", "authors"],
     "titel":             ["title", "titel"],
-    "publikationstyp":   ["publicationtype", "publikationstyp", "publication type", "type", "typ"],
+    "publikationstyp":   ["publicationtype", "publikationstyp", "publication type",
+                          "type", "typ"],
     "sprak":             ["language", "språk", "sprak"],
     "ar":                ["year", "år"],
     "abstract":          ["abstract", "sammanfattning"],
     "doi":               ["doi"],
     "urn":               ["nbn", "urn:nbn", "urn", "uri"],
     "nyckelord":         ["keywords", "nyckelord"],
-    "amne":              ["researchsubjects", "categories", "nationell ämneskategori", "subject", "subjects"],
+    # amne: Categories är primär (Bg2) — ResearchSubjects är ofta tom
+    "amne":              ["categories", "researchsubjects",
+                          "nationell ämneskategori", "subject", "subjects"],
+    # laerosate: extraheras ur Name-fältet (Bugg 3) — ingen direkt CSV-kolumn
     "laerosate":         ["organisation", "university", "institution"],
     "tidskrift":         ["journal", "tidskrift"],
-    "fulltext_url":      ["fulltextlink", "länk till fulltext", "fulltext url", "link to fulltext"],
+    # issn: DiVA-CSV:n har JournalISSN/JournalEISSN/SeriesISSN — aldrig bara ISSN (Bg1)
+    "issn":              ["journalissn", "journaleissn", "seriesissn", "serieseissn"],
+    "fulltext_url":      ["fulltextlink", "länk till fulltext",
+                          "fulltext url", "link to fulltext"],
     "granskad":          ["reviewed", "granskad", "peer reviewed", "refereed"],
     "fri_fulltext":      ["freefulltext", "fri fulltext", "free fulltext", "open access"],
     "disputationsdatum": ["defencedate", "disputationsdatum", "defense date"],
     "handledare":        ["supervisors", "handledare", "supervisor"],
     "examinator":        ["examiners", "examinator", "examiner"],
     "isbn":              ["isbn"],
-    "issn":              ["issn"],
     "foerlag":           ["publisher", "förlag"],
     "underkategori":     ["publicationsubtype", "underkategori", "subcategory"],
+    # Citationsfält för artiklar och böcker (Bg3)
+    "volym":             ["volume"],
+    "nummer":            ["issue"],
+    "startpage":         ["startpage", "start page"],
+    "slutpage":          ["endpage", "end page"],
+    "sidor":             ["pages"],
+    "hostpublication":   ["hostpublication", "host publication"],
+    # Examensarbetesnivå för kalibrerad epistemisk poäng (Bg4)
+    "thesislevel":       ["thesislevel", "thesis level"],
 }
 
 # DiVA returnerar svenska displaysträngar i PublicationType-kolumnen.
-# Mappa dessa till interna koder som _berakna_epistemisk_status förstår.
+# Mappa till interna koder som _berakna_epistemisk_status förstår.
 _DIVA_TYP_TILL_INTERN: dict[str, str] = {
-    "doktorsavhandling, monografi":                   "monographDoctoralThesis",
-    "doktorsavhandling, sammanläggning":              "comprehensiveDoctoralThesis",
-    "doktorsavhandling":                              "doctoralThesis",
-    "licentiatavhandling, monografi":                 "monographLicentiateThesis",
-    "licentiatavhandling, sammanläggning":            "comprehensiveLicentiateThesis",
-    "licentiatavhandling":                            "licentiateThesis",
-    "artikel i tidskrift":                            "article",
-    "artikel, forskningsöversikt":                    "review",
-    "artikel":                                        "article",
-    "recension":                                      "bookReview",
-    "bok":                                            "book",
-    "samlingsverk":                                   "collection",
-    "samlingsverk (redaktörskap)":                    "collection",
-    "kapitel i bok, del av antologi":                 "chapter",
-    "kapitel i bok":                                  "chapter",
-    "konferensbidrag":                                "conferencePaper",
-    "proceedings (redaktörskap)":                     "conferenceProceedings",
-    "rapport":                                        "report",
-    "studentuppsats (examensarbete)":                 "studentThesis",
-    "patent":                                         "patent",
-    "övrigt":                                         "other",
-    "konstnärlig output":                             "other",
-    "manuskript (preprint)":                          "manuscript",
+    "doktorsavhandling, monografi":        "monographDoctoralThesis",
+    "doktorsavhandling, sammanläggning":   "comprehensiveDoctoralThesis",
+    "doktorsavhandling":                   "doctoralThesis",
+    "licentiatavhandling, monografi":      "monographLicentiateThesis",
+    "licentiatavhandling, sammanläggning": "comprehensiveLicentiateThesis",
+    "licentiatavhandling":                 "licentiateThesis",
+    "artikel i tidskrift":                 "article",
+    "artikel, forskningsöversikt":         "review",
+    "artikel":                             "article",
+    "recension":                           "bookReview",
+    "bok":                                 "book",
+    "samlingsverk":                        "collection",
+    "samlingsverk (redaktörskap)":         "collection",
+    "kapitel i bok, del av antologi":      "chapter",
+    "kapitel i bok":                       "chapter",
+    "konferensbidrag":                     "conferencePaper",
+    "proceedings (redaktörskap)":          "conferenceProceedings",
+    "rapport":                             "report",
+    "studentuppsats (examensarbete)":      "studentThesis",
+    "patent":                              "patent",
+    "övrigt":                              "other",
+    "konstnärlig output":                  "other",
+    "manuskript (preprint)":               "manuscript",
 }
 
-# Föräldratyp-mappning: detaljerade koder → den kod användaren anger vid filtrering.
-# T.ex. 'monographDoctoralThesis' och 'comprehensiveDoctoralThesis' är
-# undertyper av 'doctoralThesis' — ska matcha om användaren söker 'doctoralThesis'.
+# Föräldratyp-mappning: detaljerade koder → den kod användaren anger vid filtrering
 _TYP_FOREALDRATYP: dict[str, str] = {
     "monographDoctoralThesis":       "doctoralThesis",
     "comprehensiveDoctoralThesis":   "doctoralThesis",
@@ -285,6 +217,30 @@ _TYP_FOREALDRATYP: dict[str, str] = {
     "conferenceProceedings":         "conferencePaper",
 }
 
+# Blocklista: DiVA-poster som returneras som fallback vid noll verkliga träffar.
+# Värden verifierade 2026-05-18 (audit Bg6): BTH-konferenspapper med CELEX-liknande ID.
+# Utöka via DIVA_FILLER_IDS-miljövariabel (kommaseparerad) vid behov.
+_extra_filler = {
+    s.strip()
+    for s in os.getenv("DIVA_FILLER_IDS", "").split(",")
+    if s.strip()
+}
+_KANDA_FILLER_IDS: frozenset[str] = frozenset(
+    {"diva2:833794", "diva2:837011"} | _extra_filler
+)
+
+# Stoppord som inte bidrar till relevansbedömning
+_STOPPORD: frozenset[str] = frozenset({
+    "i", "och", "av", "för", "till", "med", "på", "den", "det", "en", "ett",
+    "de", "om", "är", "som", "att", "men", "har", "inte", "vi", "du", "han",
+    "hon", "ni", "dem", "sig", "sin", "sitt", "sina", "inom", "under", "samt",
+    "vid", "från", "kan", "mot", "över", "efter", "ut", "upp", "ner", "när",
+    "of", "the", "a", "an", "and", "in", "to", "for", "on", "at", "by",
+    "with", "from", "or", "not", "it", "is", "be", "as", "are", "its",
+    "this", "that", "which", "have", "has", "had", "was", "were",
+})
+
+# ── Hjälpfunktioner för kolumnhantering ──────────────────────────────────────
 
 def _typ_for_filter(intern_typ: str) -> str:
     """Normaliserar intern typkod till föräldratyp för jämförelse vid filtrering."""
@@ -311,64 +267,45 @@ def _val(rad: dict, rubrikindex: dict, falt: str, default: str = "") -> str:
     return (rad.get(rubrik) or "").strip()
 
 
+def _extrahera_laerosate(name_field: str) -> str:
+    """
+    Extraherar lärosätets namn ur DiVA:s Name-fält.
+
+    DiVA-format: "Efternamn, Förnamn [orcid] (Lärosäte [id], Fakultet [id]);..."
+    Regex plockar det första segmentet inuti den första parentesen, före
+    komma eller hakparentes — det är lärosätets namn.
+    """
+    if not name_field:
+        return ""
+    m = re.search(r'\(([^,\[\]]+)', name_field)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
 def _formatera_enkel_sokterm(term: str) -> str:
     """
     Formaterar en enskild sökterm för DiVA:s aq/freeText-fält (SOLR-baserat).
 
-    DiVA:s SOLR-motor stödjer två matchningslägen:
-    - Implicit AND:   'öppna data'   → båda orden måste finnas i posten, men
-                                       inte nödvändigtvis adjacenta.
-    - Exakt fras:     '"öppna data"' → orden måste förekomma som exakt fras
-                                       (citattecknen bevaras in i JSON-värdet).
-
-    Användaren väljer läge via citat:
-    - Ingen citat  → AND-sökning (bred täckning, kan ge falskt positiva).
-    - Med citat    → frasmatchning (precision, kan ge färre träffar).
-
-    Regler:
-    - Citerad term:    bevara citaten så SOLR tolkar dem som frasmatchning.
-    - Ociterad term:   skicka som är (implicit AND).
-    - Tom term:        returnera tom sträng.
+    Citerade termer bevaras med sina citattecken (frasmatchning).
+    Ociterade termer skickas as-is (implicit AND — alla ord måste finnas).
     """
-    term = term.strip()
-    if not term:
-        return term
-    # Bevara yttre citat — de skickas in i freeText-JSON för SOLR-frasmatchning
-    return term
-
-
-# Stoppord som inte bidrar till relevansbedömning
-_STOPPORD: frozenset[str] = frozenset({
-    # Svenska
-    "i", "och", "av", "för", "till", "med", "på", "den", "det", "en", "ett",
-    "de", "om", "är", "som", "att", "men", "har", "inte", "vi", "du", "han",
-    "hon", "ni", "dem", "sig", "sin", "sitt", "sina", "inom", "under", "samt",
-    "vid", "från", "kan", "mot", "över", "efter", "ut", "upp", "ner", "när",
-    # Engelska
-    "of", "the", "a", "an", "and", "in", "to", "for", "on", "at", "by",
-    "with", "from", "or", "not", "it", "is", "be", "as", "are", "its",
-    "this", "that", "which", "have", "has", "had", "was", "were",
-})
+    return term.strip()
 
 
 def _ar_relevant_for_term(post: dict, sokterm: str) -> bool:
     """
-    Kontrollerar att en DiVA-post faktiskt innehåller minst ett signifikant
-    ord från söktermen i titel, abstract, nyckelord eller ämnesområde.
-
-    Filtrerar bort DiVA:s filler-poster som returneras när en sökning ger
-    noll verkliga träffar — dessa saknar all tematisk koppling till söktermen.
+    Kontrollerar att posten innehåller minst ett signifikant ord från söktermen.
+    Filtrerar bort DiVA:s filler-poster vid noll verkliga träffar.
     """
-    # Extrahera signifikanta sökord (längre än 2 tecken, ej stoppord)
     sookord = [
         o.lower()
         for o in sokterm.split()
         if len(o) > 2 and o.lower() not in _STOPPORD
     ]
     if not sookord:
-        return True  # kan inte avgöra — behåll posten
+        return True
 
-    # Sök i alla textfält
     text = " ".join(filter(None, [
         post.get("titel", ""),
         post.get("abstract", ""),
@@ -385,25 +322,34 @@ def _bestam_soktyp(publikationstyper: list[str]) -> str:
         return "all"
     undergraduate_typer = {"studentthesis", "examensarbete", "undergraduate"}
     har_undergraduate = any(p.lower() in undergraduate_typer for p in publikationstyper)
-    har_postgraduate = any(p.lower() not in undergraduate_typer for p in publikationstyper)
+    har_postgraduate  = any(p.lower() not in undergraduate_typer for p in publikationstyper)
     if har_undergraduate and not har_postgraduate:
         return "undergraduate"
     if har_postgraduate and not har_undergraduate:
         return "postgraduate"
-    # Blandat — all stöder inte publicationtype-filter men ger bredast täckning
     return "all"
 
+# ── Epistemisk status ─────────────────────────────────────────────────────────
 
 def _berakna_epistemisk_status(
     publikationstyp: str,
     har_doi: bool,
     open_access: bool,
     granskad: str,
+    examensarbete_niva: str = "",
 ) -> dict:
-    """Beräknar epistemisk status (poäng 1–7) och returnerar poäng + motivering."""
-    grundpong = _EPISTEMISK_GRUNDPONG.get(publikationstyp, 1)
+    """
+    Beräknar epistemisk status (poäng 1–7) och returnerar poäng + motivering.
 
-    # Artikel utan bekräftad granskning sänks ett steg
+    examensarbete_niva: "grund" ger EPISTEMISK_EXAMENSARBETE_GRUND (default 1),
+                        "" eller "avancerad" ger EPISTEMISK_EXAMENSARBETE_AVANCERAD
+                        (default 2). Hämtas ur ThesisLevel-kolumnen (Bg4).
+    """
+    if publikationstyp == "studentThesis" and examensarbete_niva == "grund":
+        grundpong = int(os.getenv("EPISTEMISK_EXAMENSARBETE_GRUND", "1"))
+    else:
+        grundpong = _EPISTEMISK_GRUNDPONG.get(publikationstyp, 1)
+
     if publikationstyp in ("article", "review"):
         if granskad.lower() not in ("yes", "ja", "true", "1", "x"):
             grundpong = max(1, grundpong - 1)
@@ -440,15 +386,12 @@ def _berakna_epistemisk_status(
         "patent":                        "Patent",
         "other":                         "Övrigt",
     }
-    typtext = typbeskrivningar.get(publikationstyp, publikationstyp or "Okänd typ")
-
+    typtext   = typbeskrivningar.get(publikationstyp, publikationstyp or "Okänd typ")
     motivering = typtext
     if bonus_delar:
         motivering += " + " + ", ".join(bonus_delar)
 
-    # Max 5 stjärnor i visuell display
     stjarnor = "⭐" * min(totalt, 5)
-
     return {
         "pong":      totalt,
         "typtext":   typtext,
@@ -456,6 +399,7 @@ def _berakna_epistemisk_status(
         "display":   f"{stjarnor} ({totalt}/7) — {motivering}",
     }
 
+# ── CSV-normalisering ─────────────────────────────────────────────────────────
 
 def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     """Normaliserar en CSV-rad till ett standardiserat postdikt."""
@@ -464,8 +408,6 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
         return None
 
     # Konstruera diva2:NNNNN-format
-    # DiVA's CSV har PID som bara siffror (t.ex. "356766") — lägg till prefix.
-    # URL-format "https://.../record.jsf?pid=diva2:789" och "diva2:789" hanteras med regex.
     m = re.search(r'diva2:\d+', diva_id)
     if m:
         diva_id = m.group(0)
@@ -474,12 +416,16 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     elif "/" in diva_id:
         diva_id = diva_id.rstrip("/").split("/")[-1]
 
-    # Normalisera publikationstyp: DiVA returnerar svenska displaysträngar,
-    # mappa till interna koder för epistemisk_status-beräkning.
+    # Filtrera bort kända filler-poster (modulnivå-konstant, Bg6)
+    if diva_id in _KANDA_FILLER_IDS:
+        return None
+
+    # Normalisera publikationstyp: DiVA returnerar svenska displaysträngar
     publikationstyp_raa = _val(rad, rubrikindex, "publikationstyp")
-    publikationstyp = _DIVA_TYP_TILL_INTERN.get(
+    publikationstyp     = _DIVA_TYP_TILL_INTERN.get(
         publikationstyp_raa.lower(), publikationstyp_raa or "other"
     )
+
     doi              = _val(rad, rubrikindex, "doi")
     urn              = _val(rad, rubrikindex, "urn")
     fulltext_url     = _val(rad, rubrikindex, "fulltext_url")
@@ -495,39 +441,57 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     except (ValueError, TypeError):
         ar = None
 
-    # Filtrera bort DiVA:s fallback-poster (två kända kategorier):
-    # 1. Naturvårdsverket-rapporter med korrupt årsdata: år 901, 905, 909 etc.
-    #    Avvisa poster med år < 1000 som orimliga för akademiska publikationer.
-    # 2. Kända BTH-konferenspapper (diva2:833794, diva2:837011) som DiVA returnerar
-    #    som fallback vid noll verkliga träffar. Blocklista utökas vid behov.
+    # Filtrera bort poster med orimligt lågt årtal (Naturvårdsverket-rapporter
+    # med korrupt årsdata: år 901, 905, etc.)
     if ar is not None and ar < 1000:
         return None
-    _KANDA_FILLER_IDS = {"diva2:833794", "diva2:837011"}
-    if diva_id in _KANDA_FILLER_IDS:
-        return None
+
+    # Examensarbetesnivå — avgör om grundnivå eller avancerad (Bg4)
+    thesislevel        = _val(rad, rubrikindex, "thesislevel").lower()
+    examensarbete_niva = ""
+    if publikationstyp == "studentThesis":
+        if "grundnivå" in thesislevel or "grund" in thesislevel:
+            examensarbete_niva = "grund"
+        elif "avancerad" in thesislevel:
+            examensarbete_niva = "avancerad"
 
     epistemisk = _berakna_epistemisk_status(
         publikationstyp=publikationstyp,
         har_doi=har_doi,
         open_access=open_access,
         granskad=granskad_raw,
+        examensarbete_niva=examensarbete_niva,
     )
+
+    # Lärosäte: extraheras ur Name-fältet eftersom DiVA:s CSV saknar
+    # en separat organisations-kolumn (Bugg 3)
+    forfattare_raw = _val(rad, rubrikindex, "forfattare")
+    laerosate = _extrahera_laerosate(forfattare_raw)
 
     return {
         "diva_id":           diva_id,
         "titel":             _val(rad, rubrikindex, "titel"),
-        "forfattare":        _val(rad, rubrikindex, "forfattare"),
+        "forfattare":        forfattare_raw,
         "ar":                ar,
         "publikationstyp":   publikationstyp,
         "sprak":             _val(rad, rubrikindex, "sprak"),
         "abstract":          _val(rad, rubrikindex, "abstract"),
         "nyckelord":         _val(rad, rubrikindex, "nyckelord"),
         "amne":              _val(rad, rubrikindex, "amne"),
-        "laerosate":         _val(rad, rubrikindex, "laerosate"),
+        "laerosate":         laerosate,
         "tidskrift":         _val(rad, rubrikindex, "tidskrift"),
+        "issn":              _val(rad, rubrikindex, "issn"),
         "doi":               doi,
         "urn":               urn,
         "isbn":              _val(rad, rubrikindex, "isbn"),
+        "foerlag":           _val(rad, rubrikindex, "foerlag"),
+        # Citationsfält (Bg3)
+        "volym":             _val(rad, rubrikindex, "volym"),
+        "nummer":            _val(rad, rubrikindex, "nummer"),
+        "sidor":             _val(rad, rubrikindex, "sidor"),
+        "startpage":         _val(rad, rubrikindex, "startpage"),
+        "slutpage":          _val(rad, rubrikindex, "slutpage"),
+        "hostpublication":   _val(rad, rubrikindex, "hostpublication"),
         "fulltext_url":      fulltext_url,
         "open_access":       open_access,
         "granskad":          granskad_raw,
@@ -537,15 +501,11 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
         "epistemisk_status": epistemisk,
     }
 
+# ── DiVA export-API ───────────────────────────────────────────────────────────
 
 def _hamta_diva_export(params: dict) -> list[dict]:
     """
     Anropar DiVA export.jsf med format=csvall2 och returnerar normaliserade poster.
-
-    DiVA:s export-API ignorerar parametern 'freetext' — den är ett icke-implementerat
-    alias. Korrekt sökparameter är 'aq' (advanced query) med JSON-format:
-      aq=[[{"freeText": "söktermen"}]]
-    Det yttre arrayet är OR-grupper, det inre arrayet är AND-villkor.
 
     Interna parameternamn som hanteras av denna funktion:
       freetext  → konverteras till aq=[[{"freeText": ...}]]
@@ -557,9 +517,7 @@ def _hamta_diva_export(params: dict) -> list[dict]:
     params = dict(params)
 
     # Konvertera 'freetext' → 'aq' med korrekt JSON-format.
-    # Årsfiltrering (ar_fran/ar_till) läggs till som {"dateIssued": {...}}
-    # i samma AND-grupp som freeText — DiVA:s dokumenterade format är
-    # {"dateIssued": {"from": "YYYY", "to": "YYYY"}}.
+    # Årsfiltrering läggs till i AND-gruppen med freeText om ar_fran/ar_till finns.
     ar_fran = params.pop("ar_fran", None)
     ar_till = params.pop("ar_till", None)
 
@@ -571,7 +529,7 @@ def _hamta_diva_export(params: dict) -> list[dict]:
                 and_villkor.append(
                     {"dateIssued": {"from": str(ar_fran), "to": str(ar_till)}}
                 )
-            params["aq"] = _json.dumps([and_villkor])
+            params["aq"]  = _json.dumps([and_villkor])
             params.setdefault("aqe", "[]")
             params.setdefault("af",  "[]")
             params.setdefault("aq2", "[[]]")
@@ -598,17 +556,15 @@ def _hamta_diva_export(params: dict) -> list[dict]:
         _logg.error("DiVA API-fel: %s", e)
         raise RuntimeError(f"DiVA API svarade inte: {e}") from e
 
-    # Tolka svarskropp med BOM-stöd
     text = svar.content.decode("utf-8-sig", errors="replace")
     if not text.strip():
         return []
 
-    # Detektera CSV-separator (semikolon vanligare i europeiska exporter)
     forsta_rad = text.split("\n")[0] if "\n" in text else text[:500]
-    separator = ";" if forsta_rad.count(";") > forsta_rad.count(",") else ","
+    separator  = ";" if forsta_rad.count(";") > forsta_rad.count(",") else ","
 
-    lasare = csv.DictReader(io.StringIO(text), delimiter=separator)
-    rubriker: list[str] = list(lasare.fieldnames or [])
+    lasare   = csv.DictReader(io.StringIO(text), delimiter=separator)
+    rubriker = list(lasare.fieldnames or [])
     rubrikindex = _bygg_rubrikindex(rubriker)
 
     if not rubrikindex:
@@ -634,7 +590,6 @@ def _hamta_pdf_fulltext(diva_id: str, fulltext_url: str, urn: str = "") -> str:
     Raderar PDF direkt efter lyckad extraktion (per TTL-principen).
     """
     if not fulltext_url and urn:
-        # Försök via URN:NBN-resolver
         fulltext_url = f"https://urn.kb.se/{urn}" if urn.startswith("urn:") else ""
 
     if not fulltext_url:
@@ -660,8 +615,7 @@ def _hamta_pdf_fulltext(diva_id: str, fulltext_url: str, urn: str = "") -> str:
             import pymupdf4llm
         except ImportError as imp_err:
             raise RuntimeError(
-                "pymupdf4llm är inte installerat. "
-                "Kör: $HOME/MCP-Servers/.venv/bin/pip install pymupdf4llm"
+                "pymupdf4llm är inte installerat. Kör: pip install pymupdf4llm"
             ) from imp_err
 
         with _tysta_fd1():
@@ -696,8 +650,7 @@ def _ocr_pdf(pdf_fil: Path) -> str:
 
         with _tysta_fd1():
             ocrmypdf.ocr(
-                str(pdf_fil),
-                str(ocr_fil),
+                str(pdf_fil), str(ocr_fil),
                 language="swe+eng+fra+deu",
                 skip_text=True,
                 progress_bar=False,
@@ -733,19 +686,19 @@ def _expandera_sokterm(sokterm: str) -> str:
         svar = httpx.post(
             QUERY_EXPANSION_API_URL,
             headers={
-                "Authorization":      f"Bearer {QUERY_EXPANSION_API_KEY}",
-                "Content-Type":       "application/json",
-                "anthropic-version":  "2023-06-01",
+                "Authorization":     f"Bearer {QUERY_EXPANSION_API_KEY}",
+                "Content-Type":      "application/json",
+                "anthropic-version": "2023-06-01",
             },
             json={
-                "model":      QUERY_EXPANSION_MODEL,
+                "model":    QUERY_EXPANSION_MODEL,
                 "max_tokens": 200,
-                "messages":   [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": prompt}],
             },
             timeout=15.0,
         )
         svar.raise_for_status()
-        data = svar.json()
+        data      = svar.json()
         expanderad = data["content"][0]["text"].strip()
         _logg.info("Begreppsexpansion: '%s' → '%s'", sokterm, expanderad)
         return expanderad
@@ -768,7 +721,7 @@ async def lista_verktyg() -> list[Tool]:
         Tool(
             name="diva_sok",
             description=(
-                "Söker i DiVA-Portal (Digitala Vetenskapliga Arkivet) — ~1,5 miljoner "
+                "Söker i DiVA (Digitala Vetenskapliga Arkivet) — ~1,5 miljoner "
                 "vetenskapliga publikationer från ~50 svenska lärosäten och myndigheter. "
                 "Täcker doktorsavhandlingar, licentiatavhandlingar, vetenskapliga artiklar, "
                 "böcker, rapporter, konferensbidrag och examensarbeten. "
@@ -788,8 +741,7 @@ async def lista_verktyg() -> list[Tool]:
                             "Sökterm eller kommaseparerade termer. Varje kommasegment "
                             "blir ett eget DiVA-anrop. Flerordstermer fungerar som "
                             "frasmatchning (implicit AND): 'rule of law' söker efter "
-                            "poster som innehåller alla tre orden. Tvåordstermer citeras "
-                            "automatiskt för precis frasmatchning."
+                            "poster som innehåller alla tre orden."
                         ),
                     },
                     "publikationstyp": {
@@ -811,7 +763,11 @@ async def lista_verktyg() -> list[Tool]:
                     },
                     "laerosate": {
                         "type": "string",
-                        "description": "Begränsa till ett lärosäte (klartext).",
+                        "description": (
+                            "Begränsa till ett lärosäte (klartext, t.ex. 'Uppsala universitet'). "
+                            "Kräver att lärosätets DiVA-ID finns i serverns lookup-tabell. "
+                            "Vid okänt lärosäte returneras ett felmeddelande med instruktion."
+                        ),
                     },
                     "open_access": {
                         "type": "boolean",
@@ -819,7 +775,7 @@ async def lista_verktyg() -> list[Tool]:
                     },
                     "max_traffar": {
                         "type": "integer",
-                        "description": "Antal träffar (1–250). Standard: 20.",
+                        "description": "Antal träffar (1–250). Standard: 200.",
                     },
                 },
                 "required": ["sokterm"],
@@ -888,7 +844,8 @@ async def lista_verktyg() -> list[Tool]:
                         "description": (
                             "forfattare: andra verk av samma författare. "
                             "amne: publikationer inom samma ämnesområde (standard). "
-                            "organisation: publikationer från samma lärosäte."
+                            "organisation: publikationer från samma lärosäte "
+                            "(kräver att lärosätets DiVA-ID finns i serverns lookup-tabell)."
                         ),
                     },
                     "max_traffar": {
@@ -928,12 +885,9 @@ async def _verktyg_diva_sok(args: dict) -> dict:
     if not sokterm_ra:
         return {"fel": "sokterm krävs"}
 
-    # Valfri flerspråkig expansion
     sokterm_expanderad = _expandera_sokterm(sokterm_ra)
 
-    # Dela upp i enskilda söktermer (kommaseparerade)
     alla_termer = [t.strip() for t in sokterm_expanderad.split(",") if t.strip()]
-    # Deduplicera (case-insensitivt), bevara ordning
     sett_termer: set[str] = set()
     termer: list[str] = []
     for t in alla_termer:
@@ -947,45 +901,60 @@ async def _verktyg_diva_sok(args: dict) -> dict:
         if publikationstyper_ra else []
     )
 
-    # max_traffar: mjuk övre gräns för totalt returnerade poster.
-    # Default 200 — vitsen med AI-stöd är att hantera stora datamängder,
-    # inte att efterlikna en googles förstasida.
-    max_traffar  = int(args.get("max_traffar", 200))
-    fran_ar      = args.get("fran_ar")
-    till_ar      = args.get("till_ar")
-    laerosate    = args.get("laerosate", "").strip()
-    oa_filter    = args.get("open_access", False)
+    max_traffar = int(args.get("max_traffar", 200))
+    fran_ar     = args.get("fran_ar")
+    till_ar     = args.get("till_ar")
+    laerosate   = args.get("laerosate", "").strip()
+    oa_filter   = args.get("open_access", False)
 
-    # Per term: hämta 200 rader från DiVA (mer vid typfiltrering).
-    # Utan tillräcklig volym per term täcker poolen bara de senaste åren.
+    # Lärosätesfiltrering — slå upp DiVA-organisations-ID (Bugg 2)
+    org_id: Optional[str] = None
+    if laerosate:
+        org_id = _LAEROSATE_ORG_ID.get(laerosate.lower())
+        if not org_id:
+            kanda = ", ".join(
+                sorted({v for v in _LAEROSATE_ORG_ID.keys()
+                        if not v.replace(" ", "").isdigit()})
+            )
+            return {
+                "fel": (
+                    f"Organisationsfiltrering kräver ett DiVA-organisations-ID. "
+                    f"Ingen mappning hittades för '{laerosate}'. "
+                    f"Lärosäten med känd mappning: {kanda}. "
+                    "Lägg till fler via DiVA-portalen: sök på organisationens namn "
+                    "och inspektera URL-parametern 'organisationId' i sökfrågan."
+                )
+            }
+
     hamta_rader = 300 if publikationstyper else 200
 
     def _bygg_params(term: str) -> dict:
-        """Bygger DiVA-sökparametrar för en enskild term."""
-        p: dict[str, Any] = {
-            "searchtype": "all",
-            "freetext":   _formatera_enkel_sokterm(term),
-            "rows":       hamta_rader,
-            # Ingen year-sortering — DiVA sorterar på relevans,
-            # vi sorterar klient-sidan på epistemisk_status + år.
-        }
-        # Årsfiltrering via DiVA:s aq-format: {"dateIssued": {"from":..., "to":...}}
-        # Hanteras av _hamta_diva_export som bäddar in det i AND-gruppen med freeText.
+        """Bygger DiVA-sökparametrar för en enskild term med korrekt aq-format."""
+        import json as _json
+        p: dict[str, Any] = {"searchtype": "all", "rows": hamta_rader}
+
+        # Bygg AND-grupp i aq med freeText, eventuell årsfiltrering och org-filter
+        and_villkor: list[dict] = [{"freeText": _formatera_enkel_sokterm(term)}]
         if fran_ar and till_ar:
-            p["ar_fran"] = str(int(fran_ar))
-            p["ar_till"] = str(int(till_ar))
-        if laerosate:
-            p["organisation"] = laerosate
+            and_villkor.append(
+                {"dateIssued": {"from": str(int(fran_ar)), "to": str(int(till_ar))}}
+            )
+        if org_id:
+            and_villkor.append({"organisationId": org_id, "organisationId-Xtra": False})
+
+        p["aq"]  = _json.dumps([and_villkor])
+        p["aqe"] = "[]"
+        p["af"]  = "[]"
+        p["aq2"] = "[[]]"
+
         if oa_filter:
-            p["fulltext"] = "true"
+            p["onlyFullText"] = "true"
         return p
 
     async def _sok_en_term(term: str) -> tuple[str, list[dict]]:
-        """Kör ett DiVA-anrop för en enskild term i en trådpool."""
         poster = await asyncio.to_thread(_hamta_diva_export, _bygg_params(term))
         return term, poster
 
-    # Kör alla termer parallellt
     _logg.info(
         "diva_sok: %d termer parallellt: %s",
         len(termer),
@@ -996,7 +965,6 @@ async def _verktyg_diva_sok(args: dict) -> dict:
         return_exceptions=True,
     )
 
-    # Merge: deduplicera på diva_id, notera träffande sökterm
     sett_ids: set[str] = set()
     alla_poster: list[dict] = []
     for res in resultat:
@@ -1011,7 +979,6 @@ async def _verktyg_diva_sok(args: dict) -> dict:
                 post["_sokterm"] = term
                 alla_poster.append(post)
 
-    # Client-side filtrering på publikationstyp
     if publikationstyper:
         typer_set = {p.lower() for p in publikationstyper}
         alla_poster = [
@@ -1020,19 +987,17 @@ async def _verktyg_diva_sok(args: dict) -> dict:
             or p.get("publikationstyp", "").lower() in typer_set
         ]
 
-    # Sortera: epistemisk poäng desc, sedan år desc
+    # Sortera: epistemisk poäng desc, sedan år desc (Bugg 1: använd "pong" inte "total")
     alla_poster.sort(
         key=lambda p: (
-            p.get("epistemisk_status", {}).get("total", 0),
+            p.get("epistemisk_status", {}).get("pong", 0),
             p.get("ar") or 0,
         ),
         reverse=True,
     )
 
-    # Begränsa till max_traffar
     alla_poster = alla_poster[:max_traffar]
 
-    # Vilka termer gav faktiska träffar
     termer_med_traffar = sorted({
         p["_sokterm"] for p in alla_poster if p.get("_sokterm")
     })
@@ -1041,7 +1006,7 @@ async def _verktyg_diva_sok(args: dict) -> dict:
         return {
             "sokterm_original":    sokterm_ra,
             "antal_termer_sokta":  len(termer),
-            "antal_traffar":       0,
+            "antal_returnerade":   0,
             "poster":              [],
             "meddelande": (
                 "Inga träffar hittades i DiVA. "
@@ -1054,7 +1019,9 @@ async def _verktyg_diva_sok(args: dict) -> dict:
         "sokterm_original":   sokterm_ra,
         "antal_termer_sokta": len(termer),
         "termer_med_traffar": termer_med_traffar,
-        "antal_traffar":      len(alla_poster),
+        # Bg5: antal_returnerade (inte antal_traffar) — tydliggör att det
+        # är antalet returnerade poster, inte DiVA-databasens totalantal
+        "antal_returnerade":  len(alla_poster),
         "poster":             alla_poster,
     }
 
@@ -1070,23 +1037,19 @@ async def _verktyg_diva_hamta_post(args: dict) -> dict:
     import json as _json
 
     if diva_id:
-        # Direktuppslagning via aq-filter på PID — returnerar exakt den begärda posten
         poster = _hamta_diva_export({
             "searchtype": "all",
             "aq":         _json.dumps([[{"pid": diva_id}]]),
             "noOfRows":   1,
         })
     elif urn:
-        # URN-sökning via freetext (DiVA indexerar URN:NBN i fritextsökning)
         poster = _hamta_diva_export({
             "searchtype": "all",
             "freetext":   urn,
             "noOfRows":   3,
         })
-        # Filtrera på exakt URN-match
         poster = [p for p in poster if p.get("urn", "").lower() == urn.lower()]
     else:
-        # DOI-sökning
         poster = _hamta_diva_export({
             "searchtype": "all",
             "freetext":   doi,
@@ -1105,17 +1068,15 @@ async def _verktyg_diva_hamta_fulltext(args: dict) -> dict:
     if not diva_id:
         return {"fel": "diva_id krävs"}
 
-    # Kolla cache
-    cachad = _hamta_cachad_fulltext(diva_id)
+    cachad = db.hamta_cachad_fulltext(diva_id)
     if cachad:
         return {
-            "diva_id":      diva_id,
-            "kalla":        "cache",
-            "fulltext_md":  cachad,
-            "tecken":       len(cachad),
+            "diva_id":     diva_id,
+            "kalla":       "cache",
+            "fulltext_md": cachad,
+            "tecken":      len(cachad),
         }
 
-    # Hämta metadata för att få fulltext_url
     post = await _verktyg_diva_hamta_post({"diva_id": diva_id})
     if "fel" in post:
         return post
@@ -1135,7 +1096,7 @@ async def _verktyg_diva_hamta_fulltext(args: dict) -> dict:
     if not fulltext_md:
         return {"fel": f"Kunde inte extrahera text från {diva_id}"}
 
-    _spara_fulltext(
+    db.spara_fulltext(
         diva_id=diva_id,
         urn=urn,
         doi=post.get("doi", ""),
@@ -1168,7 +1129,7 @@ async def _verktyg_diva_relaterade(args: dict) -> dict:
 
     diva_params: dict[str, Any] = {
         "searchtype": "all",
-        "noOfRows":   max_traffar + 1,  # +1 för att filtrera bort ursprungsposten
+        "noOfRows":   max_traffar + 1,
         "sort":       "year desc",
     }
     beskrivning = ""
@@ -1177,15 +1138,11 @@ async def _verktyg_diva_relaterade(args: dict) -> dict:
         forfattare_rad = post.get("forfattare", "")
         if not forfattare_rad:
             return {"fel": "Ingen författarinformation tillgänglig för denna post"}
-        # Ta förste författarens namn (DiVA-format: "Efternamn, Förnamn [id] (institution);...")
-        # Extrahera bara "Efternamn, Förnamn" — klipp bort [id] och (institution)
         import re as _re
         forste_full = forfattare_rad.split(";")[0].strip()
-        # Ta bort [...] och (...) suffix
-        forste = _re.sub(r'\s*[\[\(].*', '', forste_full).strip()
+        forste      = _re.sub(r'\s*[\[\(].*', '', forste_full).strip()
         if not forste:
             return {"fel": "Kunde inte tolka författarnamn"}
-        # Använd aq-sökning på name-fältet för exakt namnsökning
         import json as _json
         diva_params["aq"] = _json.dumps([[{"name": forste}]])
         beskrivning = f"Andra verk av {forste}"
@@ -1193,8 +1150,7 @@ async def _verktyg_diva_relaterade(args: dict) -> dict:
     elif relationstyp == "amne":
         amne      = post.get("amne", "")
         nyckelord = post.get("nyckelord", "")
-        # Välj primärt ämne: nationell ämneskategori > nyckelord > titel
-        kandidat = amne or nyckelord or post.get("titel", "")
+        kandidat  = amne or nyckelord or post.get("titel", "")
         sokterm_amne = kandidat.split(";")[0].split(",")[0].strip()[:80]
         if not sokterm_amne:
             return {"fel": "Ingen ämneskategori eller nyckelord tillgängliga för denna post"}
@@ -1202,18 +1158,34 @@ async def _verktyg_diva_relaterade(args: dict) -> dict:
         beskrivning = f"Publikationer inom ämnet: {sokterm_amne}"
 
     elif relationstyp == "organisation":
-        laerosate = post.get("laerosate", "")
-        if not laerosate:
+        laerosate_post = post.get("laerosate", "")
+        if not laerosate_post:
             return {"fel": "Ingen organisationsinformation tillgänglig för denna post"}
-        diva_params["organisation"] = laerosate
-        diva_params["searchtype"]   = "postgraduate"
-        beskrivning = f"Publikationer från {laerosate}"
+        org_id = _LAEROSATE_ORG_ID.get(laerosate_post.lower())
+        if not org_id:
+            return {
+                "fel": (
+                    f"Organisationsfiltrering kräver DiVA-organisations-ID. "
+                    f"Ingen mappning för '{laerosate_post}'. "
+                    "Utöka _LAEROSATE_ORG_ID-tabellen med verifierade ID:n."
+                )
+            }
+        import json as _json
+        diva_params["aq"] = _json.dumps(
+            [[{"organisationId": org_id, "organisationId-Xtra": False}]]
+        )
+        diva_params["searchtype"] = "postgraduate"
+        beskrivning = f"Publikationer från {laerosate_post}"
 
     else:
-        return {"fel": f"Okänd relationstyp: {relationstyp}. Tillåtna: forfattare, amne, organisation"}
+        return {
+            "fel": (
+                f"Okänd relationstyp: {relationstyp}. "
+                "Tillåtna: forfattare, amne, organisation"
+            )
+        }
 
     poster = _hamta_diva_export(diva_params)
-    # Filtrera bort ursprungsposten
     poster = [p for p in poster if p.get("diva_id") != diva_id][:max_traffar]
 
     return {
@@ -1227,8 +1199,8 @@ async def _verktyg_diva_relaterade(args: dict) -> dict:
 # ── Serverstart ───────────────────────────────────────────────────────────────
 
 def _starta_server() -> None:
-    _db_init()
-    _logg.info("DiVA-Portal MCP-server startar (transport=%s)", MCP_TRANSPORT)
+    db.initiera_schema()  # try/except hanteras inuti funktionen
+    _logg.info("DiVA MCP-server startar (transport=%s)", MCP_TRANSPORT)
 
     if MCP_TRANSPORT == "http":
         _starta_http()
@@ -1242,7 +1214,13 @@ async def _starta_stdio() -> None:
 
 
 def _starta_http() -> None:
-    """HTTP-transport med Bearer-token-autentisering (Starlette + uvicorn)."""
+    """
+    HTTP-transport med Bearer-token-autentisering (Starlette + uvicorn).
+
+    Använder SseServerTransport (äldre mcp-stil) — migrering till
+    streamable_http_app() är planerad men ej brådskande för stdio-användare.
+    Se audit 2026-05-18, Konvention 12.
+    """
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.middleware.base import BaseHTTPMiddleware

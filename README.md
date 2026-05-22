@@ -46,7 +46,7 @@ Redigera `.env` och ange databasanslutning. PostgreSQL rekommenderas:
 DATABASE_URL=postgresql://anvandare:losenord@localhost:5432/databas
 ```
 
-SQLite-fallback (inget PostgreSQL behövs):
+SQLite-backend (välj vid installation):
 
 ```env
 DATABASE_URL=sqlite:///diva_cache.db
@@ -58,9 +58,9 @@ Exempel för Claude Desktop (`claude_desktop_config.json`):
 
 ```json
 "diva": {
-  "command": "/sökväg/till/python3",
-  "args": ["/sökväg/till/mcp_server.py"],
-  "cwd": "/sökväg/till/mcp-for-diva"
+  "command": "<SOKVAG_TILL_PYTHON3>",
+  "args": ["<SOKVAG_TILL_MCP_SERVER>"],
+  "cwd": "<SOKVAG_TILL_PROJEKTMAPPEN>"
 }
 ```
 
