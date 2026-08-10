@@ -89,6 +89,11 @@ logging.basicConfig(
 )
 _logg = logging.getLogger("diva")
 
+# Standardtak för fulltext i diva_hamta_fulltext. Avhandlingar kan vara över en
+# miljon tecken och överskrida MCP-protokollets storleksgräns, vilket får anropet
+# att misslyckas helt. Anroparen kan höja taket eller sätta 0 för hela texten.
+DIVA_MAX_TECKEN = int(os.getenv("DIVA_MAX_TECKEN", "60000"))
+
 # ── FD1-skydd (MCP-stdio-hygien) ──────────────────────────────────────────────
 
 @contextlib.contextmanager
@@ -821,6 +826,20 @@ async def lista_verktyg() -> list[Tool]:
                         "type": "string",
                         "description": "DiVA-id, t.ex. 'diva2:123456'.",
                     },
+                    "max_tecken": {
+                        "type": "integer",
+                        "description": (
+                            "Teckentak för fulltexten (standard 60 000, 0 = hela texten). "
+                            "Avhandlingar kan vara över en miljon tecken; utan tak "
+                            "misslyckas anropet mot svarsgränsen."
+                        ),
+                        "default": 60000,
+                    },
+                    "fran_tecken": {
+                        "type": "integer",
+                        "description": "Börja texten vid denna teckenposition — för att läsa vidare.",
+                        "default": 0,
+                    },
                 },
                 "required": ["diva_id"],
             },
@@ -1063,18 +1082,58 @@ async def _verktyg_diva_hamta_post(args: dict) -> dict:
     return poster[0]
 
 
+def _skar_ut(text, max_tecken: int, fran_tecken: int = 0) -> dict:
+    """
+    Skär ut ett textutdrag och redovisa alltid vad som kapats.
+
+    Trunkering utan markering är ett tyst datafel — svaret ser ut att vara hela
+    innehållet. max_tecken <= 0 betyder ingen trunkering. Klipper på ordgräns.
+    """
+    text   = text or ""
+    totalt = len(text)
+    start  = max(0, min(fran_tecken, totalt))
+    rest   = text[start:]
+
+    if max_tecken and max_tecken > 0 and len(rest) > max_tecken:
+        utdrag    = rest[:max_tecken]
+        brytpunkt = max(utdrag.rfind(" "), utdrag.rfind("\n"))
+        if brytpunkt > max_tecken * 0.6:
+            utdrag = utdrag[:brytpunkt]
+        utdrag    = utdrag.rstrip()
+        trunkerad = True
+    else:
+        utdrag    = rest
+        trunkerad = False
+
+    slut = start + len(utdrag)
+    return {
+        "text":                 utdrag,
+        "tecken_totalt":        totalt,
+        "tecken_visade":        len(utdrag),
+        "trunkerad":            trunkerad,
+        "fortsatt_fran_tecken": slut if slut < totalt else None,
+    }
+
+
 async def _verktyg_diva_hamta_fulltext(args: dict) -> dict:
     diva_id = args.get("diva_id", "").strip()
     if not diva_id:
         return {"fel": "diva_id krävs"}
 
+    max_tecken  = int(args.get("max_tecken", DIVA_MAX_TECKEN) or 0)
+    fran_tecken = int(args.get("fran_tecken", 0) or 0)
+
     cachad = db.hamta_cachad_fulltext(diva_id)
     if cachad:
+        utdrag = _skar_ut(cachad, max_tecken, fran_tecken)
         return {
             "diva_id":     diva_id,
             "kalla":       "cache",
-            "fulltext_md": cachad,
-            "tecken":      len(cachad),
+            "fulltext_md": utdrag["text"],
+            "tecken_totalt":        utdrag["tecken_totalt"],
+            "tecken_visade":        utdrag["tecken_visade"],
+            "trunkerad":            utdrag["trunkerad"],
+            "fortsatt_fran_tecken": utdrag["fortsatt_fran_tecken"],
         }
 
     post = await _verktyg_diva_hamta_post({"diva_id": diva_id})
@@ -1107,11 +1166,16 @@ async def _verktyg_diva_hamta_fulltext(args: dict) -> dict:
         fulltext_md=fulltext_md,
     )
 
+    # Databasen har alltid hela texten — trunkeringen gäller bara svaret.
+    utdrag = _skar_ut(fulltext_md, max_tecken, fran_tecken)
     return {
         "diva_id":     diva_id,
         "kalla":       "diva",
-        "fulltext_md": fulltext_md,
-        "tecken":      len(fulltext_md),
+        "fulltext_md": utdrag["text"],
+        "tecken_totalt":        utdrag["tecken_totalt"],
+        "tecken_visade":        utdrag["tecken_visade"],
+        "trunkerad":            utdrag["trunkerad"],
+        "fortsatt_fran_tecken": utdrag["fortsatt_fran_tecken"],
     }
 
 

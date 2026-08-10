@@ -3,7 +3,35 @@
 Formatet följer [Keep a Changelog](https://keepachangelog.com/sv/1.0.0/).
 Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
-## [Unreleased]
+## [1.2.0] — 2026-08-10
+
+### Tillagt
+
+- **`max_tecken` och `fran_tecken` i `diva_hamta_fulltext`**, med standardtaket
+  `DIVA_MAX_TECKEN` (60 000 tecken, konfigurerbart i `.env`). Den största cachade
+  posten är **1 214 096 tecken** — en avhandling — vilket gav ett svar på 1 222 478
+  tecken och därmed överskred MCP-protokollets storleksgräns. Anropet misslyckades
+  alltid för den posten. Med standardtaket blir samma anrop 60 718 tecken.
+  Kapade svar bär `trunkerad`, `tecken_totalt`, `tecken_visade` och
+  `fortsatt_fran_tecken`; kapningen sker på ordgräns.
+- Taket tillämpas på både cacheträff och nyhämtad text, så svarsstrukturen är
+  densamma oavsett kodväg.
+
+### Bakgrund
+
+Genomför projektets svarskontrakt (`00-las-forst.md` → "Svarskontraktet — storlek,
+trunkering, adressering och sökning"). Additiva parametrar och fält; inga brytande
+ändringar och inga schemaändringar. Cachen och databasen lagrar fortfarande hela
+texten — trunkeringen gäller bara svaret till anroparen, så sökning och indexering
+påverkas inte.
+
+---
+
+## [1.1.0] — 2026-05-22
+
+Publicerad 2026-05-22 (commit `0c58d2f`, tagg `v1.1.0`). Posten skrevs in i
+efterhand 2026-08-10 — arbetet låg under `[Unreleased]` när versionen taggades
+och rubriken döptes aldrig om.
 
 ### Fixat
 

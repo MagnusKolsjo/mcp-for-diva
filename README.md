@@ -97,6 +97,24 @@ Varje träff i `diva_sok` innehåller `epistemisk_status` med ett poängvärde (
 
 Skalan och vikterna är konfigurerbara via `.env`.
 
+
+## Svarsstorlek och trunkering
+
+MCP-protokollet har en övre storleksgräns per svar. Den största cachade posten är en avhandling på **1 214 096 tecken** — över gränsen.
+`diva_hamta_fulltext` tar därför två parametrar:
+
+| Parameter | Innebörd |
+|---|---|
+| `max_tecken` | Teckentak för texten. Standard 60 000 tecken; `0` ger hela texten som ett uttryckligt val. |
+| `fran_tecken` | Börja vid denna teckenposition — för att läsa vidare där ett kapat svar slutade. |
+
+Ett kapat svar säger alltid ifrån med fälten `trunkerad`, `tecken_totalt`, `tecken_visade` och `fortsatt_fran_tecken`. Kapningen sker på ordgräns, aldrig mitt i
+ett ord.
+
+**Vid ordagranna citat:** citera aldrig ur ett svar som är markerat som kapat.
+Läs vidare med `fran_tecken` tills hela passagen är hämtad. Standardvärdet kan
+sättas i `.env` med `DIVA_MAX_TECKEN`.
+
 ## Licens
 
 AGPLv3 — se [LICENSE](LICENSE).
