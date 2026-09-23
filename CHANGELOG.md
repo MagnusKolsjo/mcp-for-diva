@@ -36,6 +36,15 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
 ### Fixat
 
+- `diva_sok` med standardvärdet 200 träffar kunde ge ett svar på över 1,3 MB
+  (JSON-text plus `structuredContent`), över MCP-klienternas gräns på ungefär
+  1 MB. I träfflistorna från `diva_sok` och `diva_relaterade` kortas nu
+  abstracts till cirka 600 tecken, markerat med `abstract_kapad` och
+  `abstract_tecken_totalt`. Listan kapas när posterna når ett bytetak som håller
+  svaret under cirka 800 KB; ett kapat svar bär `trunkerad`,
+  `utelamnade_poster` och ett `meddelande` om hur sökningen kan snävas in.
+  De lägst rankade posterna utelämnas först. `diva_hamta_post` ger alltid hela
+  posten. `max_traffar` betyder som förut högsta antal träffar.
 - En sökning där anropen för alla termer misslyckades redovisades som noll
   träffar. Den ger nu ett felsvar med orsaken.
 - Samtidiga fulltextanrop kunde skriva över varandras tillfälliga PDF-fil och

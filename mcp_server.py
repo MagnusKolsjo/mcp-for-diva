@@ -863,6 +863,9 @@ DivaPost = TypedDict(
         "disputationsdatum": str,
         "epistemisk_status": EpistemiskStatus,
         "_sokterm": NotRequired[str],
+        # Bara i träfflistor, när abstractet har kortats; diva_hamta_post ger hela.
+        "abstract_kapad": NotRequired[bool],
+        "abstract_tecken_totalt": NotRequired[int],
     },
 )
 
@@ -877,6 +880,8 @@ class Sokresultat(TypedDict):
     poster: list[DivaPost]
     meddelande: NotRequired[str]
     misslyckade_termer: NotRequired[list[str]]
+    trunkerad: NotRequired[bool]
+    utelamnade_poster: NotRequired[int]
 
 
 class Fulltext(TypedDict):
@@ -899,6 +904,64 @@ class Relaterade(TypedDict):
     beskrivning: str
     antal: int
     poster: list[DivaPost]
+    meddelande: NotRequired[str]
+    trunkerad: NotRequired[bool]
+    utelamnade_poster: NotRequired[int]
+
+
+# ── Storlek på träfflistor ────────────────────────────────────────────────────
+#
+# MCP-klienter avvisar svar över ungefär 1 MB, och ett typat svar skickas två
+# gånger: som JSON-text och som structuredContent. En träfflista med 200 poster
+# och fulla abstracts blir över 1,3 MB. Därför kortas abstracts i listor, och
+# listan kapas när posterna tillsammans når ett bytetak som håller hela svaret
+# under cirka 800 KB. diva_hamta_post ger alltid posten oförkortad.
+
+_LISTA_ABSTRACT_MAX_TECKEN = 600
+_LISTA_MAX_BYTE = 300_000
+
+
+def _korta_abstract(post: dict) -> dict:
+    """Kortar abstractet på ordgräns och markerar att det är kapat."""
+    abstract = post.get("abstract", "")
+    if len(abstract) <= _LISTA_ABSTRACT_MAX_TECKEN:
+        return post
+    utdrag = abstract[:_LISTA_ABSTRACT_MAX_TECKEN]
+    brytpunkt = utdrag.rfind(" ")
+    if brytpunkt > _LISTA_ABSTRACT_MAX_TECKEN * 0.6:
+        utdrag = utdrag[:brytpunkt]
+    post = dict(post)
+    post["abstract"] = utdrag.rstrip() + " …"
+    post["abstract_kapad"] = True
+    post["abstract_tecken_totalt"] = len(abstract)
+    return post
+
+
+def _begransa_traffar(poster: list[dict]) -> tuple[list[dict], int]:
+    """Kortar abstracts och kapar listan vid bytetaket.
+
+    Returnerar posterna som ryms och antalet som utelämnades. Posterna hålls i
+    inkommande ordning, så att de som utelämnas är de lägst rankade.
+    """
+    ryms: list[dict] = []
+    storlek = 0
+    for post in poster:
+        kort = _korta_abstract(post)
+        storlek += len(json.dumps(kort, ensure_ascii=False).encode("utf-8"))
+        if ryms and storlek > _LISTA_MAX_BYTE:
+            break
+        ryms.append(kort)
+    return ryms, len(poster) - len(ryms)
+
+
+def _markera_utelamnade(svar: dict, utelamnade: int, rad: str) -> None:
+    if utelamnade:
+        svar["trunkerad"] = True
+        svar["utelamnade_poster"] = utelamnade
+        svar["meddelande"] = (
+            f"Svaret är kapat: {utelamnade} poster till matchade men ryms inte "
+            f"inom svarsgränsen. {rad}"
+        )
 
 
 # ── MCP-server ────────────────────────────────────────────────────────────────
@@ -911,7 +974,9 @@ mcp = MCPServer(
         "myndigheter. Verktygen har prefixet diva_. Kedjan är diva_sok → "
         "diva_hamta_post → diva_hamta_fulltext; diva_relaterade utgår från en "
         "känd post. Varje post bär epistemisk_status (1–7) som värderar "
-        "källtypen. Fulltexten kapas vid max_tecken; ett kapat svar bär "
+        "källtypen. Abstracts i träfflistor är kortade (abstract_kapad) och "
+        "långa listor kapas vid svarsgränsen (trunkerad); diva_hamta_post ger "
+        "hela posten. Fulltexten kapas vid max_tecken; ett kapat svar bär "
         "trunkerad och fortsatt_fran_tecken, och ordagranna citat ska aldrig "
         "tas ur ett kapat utdrag."
     ),
@@ -1079,7 +1144,7 @@ def diva_sok(
         key=lambda p: (p["epistemisk_status"]["pong"], p.get("ar") or 0),
         reverse=True,
     )
-    alla_poster = alla_poster[:max_traffar]
+    alla_poster, utelamnade = _begransa_traffar(alla_poster[:max_traffar])
 
     svar: Sokresultat = {
         "sokterm_original":   sokterm_ra,
@@ -1099,6 +1164,11 @@ def diva_sok(
         )
     if misslyckade:
         svar["misslyckade_termer"] = [f"{t}: {fel}" for t, fel in misslyckade]
+    _markera_utelamnade(
+        svar, utelamnade,
+        "Snäva in sökningen med publikationstyp, fran_ar/till_ar eller "
+        "open_access, eller sänk max_traffar.",
+    )
     return svar
 
 
@@ -1300,14 +1370,17 @@ def diva_relaterade(
 
     poster = _hamta_diva_export(diva_params)
     poster = [p for p in poster if p.get("diva_id") != diva_id][:max_traffar]
+    poster, utelamnade = _begransa_traffar(poster)
 
-    return {
+    svar: Relaterade = {
         "ursprung_diva_id": diva_id,
         "relationstyp":     relationstyp,
         "beskrivning":      beskrivning,
         "antal":            len(poster),
         "poster":           poster,  # type: ignore[typeddict-item]
     }
+    _markera_utelamnade(svar, utelamnade, "Sänk max_traffar.")
+    return svar
 
 # ── Serverstart ───────────────────────────────────────────────────────────────
 
