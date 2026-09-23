@@ -507,6 +507,50 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     }
 
 # ── DiVA export-API ───────────────────────────────────────────────────────────
+#
+# Servern bygger helt på export.jsf i formatet csvall2. Ett giltigt svar är
+# alltid CSV med en rubrikrad, även vid noll träffar. Allt annat — en HTML-sida,
+# en omdirigering till en annan webbplats, ett tomt svar eller en CSV utan de
+# kända rubrikerna — betyder att källan har ändrats. Det ska ge ett tydligt fel,
+# aldrig tomma träffar som ser ut som ett riktigt sökresultat.
+
+# Utan dessa kolumner går varken id eller titel att läsa ut ur en rad.
+_OBLIGATORISKA_KOLUMNER: tuple[str, ...] = ("diva_id", "titel")
+
+
+class DivaKallaFel(RuntimeError):
+    """DiVA svarade, men inte med den CSV-export servern är byggd för."""
+
+
+def _kontrollera_csv_svar(svar: httpx.Response, text: str) -> None:
+    """Kastar DivaKallaFel om svaret från export.jsf inte ser ut som CSV."""
+    innehallstyp = svar.headers.get("content-type", "").lower()
+    borjan = text.lstrip()[:200].lower()
+    ar_html = (
+        "html" in innehallstyp
+        or borjan.startswith("<")
+        or "<html" in borjan
+    )
+    if ar_html:
+        _logg.error(
+            "DiVA svarade med HTML i stället för CSV (content-type %r, url %s)",
+            innehallstyp, svar.url,
+        )
+        raise DivaKallaFel(
+            "DiVA svarade med en webbsida i stället för CSV-export "
+            f"(adress efter omdirigering: {svar.url}). Källan kan ha bytt "
+            "plattform, eller export.jsf kan vara tillfälligt ur drift. Försök "
+            "igen senare; kvarstår felet behöver servern anpassas till den nya "
+            "källan."
+        )
+    if not text.strip():
+        _logg.error("DiVA svarade med tom kropp (url %s)", svar.url)
+        raise DivaKallaFel(
+            "DiVA svarade med ett tomt svar utan kolumnrubriker. Export.jsf ger "
+            "normalt en rubrikrad även när sökningen saknar träffar, så svaret "
+            "tyder på ett tillfälligt fel eller att källan har bytt plattform."
+        )
+
 
 def _hamta_diva_export(params: dict) -> list[dict]:
     """
@@ -556,14 +600,28 @@ def _hamta_diva_export(params: dict) -> list[dict]:
             timeout=30.0,
             follow_redirects=True,
         )
+    except httpx.HTTPError as e:
+        _logg.error("DiVA API-fel: %s", e)
+        raise RuntimeError(f"DiVA API svarade inte: {e}") from e
+
+    # 404 och 410 betyder att adressen inte längre finns, inte att DiVA är
+    # tillfälligt nere — det mest sannolika skälet är att export.jsf har
+    # avvecklats.
+    if svar.status_code in (404, 410):
+        _logg.error("DiVA export.jsf gav HTTP %s (url %s)", svar.status_code, svar.url)
+        raise DivaKallaFel(
+            f"DiVA:s export.jsf svarade HTTP {svar.status_code} — adressen finns "
+            "inte längre. Källan kan ha bytt plattform; servern behöver då "
+            "anpassas till den nya källan."
+        )
+    try:
         svar.raise_for_status()
     except httpx.HTTPError as e:
         _logg.error("DiVA API-fel: %s", e)
         raise RuntimeError(f"DiVA API svarade inte: {e}") from e
 
     text = svar.content.decode("utf-8-sig", errors="replace")
-    if not text.strip():
-        return []
+    _kontrollera_csv_svar(svar, text)
 
     forsta_rad = text.split("\n")[0] if "\n" in text else text[:500]
     separator  = ";" if forsta_rad.count(";") > forsta_rad.count(",") else ","
@@ -572,10 +630,17 @@ def _hamta_diva_export(params: dict) -> list[dict]:
     rubriker = list(lasare.fieldnames or [])
     rubrikindex = _bygg_rubrikindex(rubriker)
 
-    if not rubrikindex:
-        _logg.warning(
-            "Inga kända kolumnnamn hittades i DiVA-svaret. "
-            "Faktiska rubriker: %s", rubriker[:10]
+    saknade = [f for f in _OBLIGATORISKA_KOLUMNER if f not in rubrikindex]
+    if saknade:
+        _logg.error(
+            "DiVA-svaret saknar obligatoriska kolumner %s. Faktiska rubriker: %s",
+            saknade, rubriker[:15],
+        )
+        raise DivaKallaFel(
+            "DiVA:s CSV-export saknar de kolumnrubriker servern bygger på "
+            f"(saknas: {', '.join(saknade)}). Källan kan ha bytt plattform eller "
+            "exportformat; servern behöver då anpassas. Träffar kan inte "
+            "redovisas förrän dess."
         )
 
     poster: list[dict] = []
@@ -983,6 +1048,12 @@ async def _verktyg_diva_sok(args: dict) -> dict:
         *[_sok_en_term(t) for t in termer],
         return_exceptions=True,
     )
+
+    # Misslyckas varje term är det källan som felar, inte sökningen som saknar
+    # träffar. Ett tomt resultat skulle då dölja felet.
+    fel = [res for res in resultat if isinstance(res, Exception)]
+    if fel and len(fel) == len(resultat):
+        raise fel[0]
 
     sett_ids: set[str] = set()
     alla_poster: list[dict] = []
