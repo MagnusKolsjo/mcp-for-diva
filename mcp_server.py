@@ -146,7 +146,7 @@ _DIVA_HUVUDEN = {
     "Referer":    "https://www.diva-portal.org/",
 }
 
-# ── Lärosätesfiltrering (Bugg 2) ──────────────────────────────────────────────
+# ── Lärosätesfiltrering ───────────────────────────────────────────────────────
 #
 # DiVA:s export-API kräver ett numeriskt organisations-ID i aq-strukturen
 # för lärosätesfiltrering. URL-parametern "organisation=<klartext>" ignoreras
@@ -155,7 +155,7 @@ _DIVA_HUVUDEN = {
 # Lägg till fler via DiVA-portalen: sök efter organisationen, inspektera
 # URL-parametern "organisationId" i sökfrågan.
 _LAEROSATE_ORG_ID: dict[str, str] = {
-    # Uppsala universitet — verifierat 2026-05-18 (audit Bugg 2)
+    # Uppsala universitet — verifierat mot DiVA-portalen
     "uppsala":                     "4853",
     "uppsala university":          "4853",
     "uppsala universitet":         "4853",
@@ -178,13 +178,13 @@ _KOLUMN_ALIAS: dict[str, list[str]] = {
     "doi":               ["doi"],
     "urn":               ["nbn", "urn:nbn", "urn", "uri"],
     "nyckelord":         ["keywords", "nyckelord"],
-    # amne: Categories är primär (Bg2) — ResearchSubjects är ofta tom
+    # amne: Categories är primär — ResearchSubjects är ofta tom
     "amne":              ["categories", "researchsubjects",
                           "nationell ämneskategori", "subject", "subjects"],
-    # laerosate: extraheras ur Name-fältet (Bugg 3) — ingen direkt CSV-kolumn
+    # laerosate: extraheras ur Name-fältet — ingen direkt CSV-kolumn
     "laerosate":         ["organisation", "university", "institution"],
     "tidskrift":         ["journal", "tidskrift"],
-    # issn: DiVA-CSV:n har JournalISSN/JournalEISSN/SeriesISSN — aldrig bara ISSN (Bg1)
+    # issn: DiVA-CSV:n har JournalISSN/JournalEISSN/SeriesISSN — aldrig bara ISSN
     "issn":              ["journalissn", "journaleissn", "seriesissn", "serieseissn"],
     "fulltext_url":      ["fulltextlink", "länk till fulltext",
                           "fulltext url", "link to fulltext"],
@@ -196,14 +196,14 @@ _KOLUMN_ALIAS: dict[str, list[str]] = {
     "isbn":              ["isbn"],
     "foerlag":           ["publisher", "förlag"],
     "underkategori":     ["publicationsubtype", "underkategori", "subcategory"],
-    # Citationsfält för artiklar och böcker (Bg3)
+    # Citationsfält för artiklar och böcker
     "volym":             ["volume"],
     "nummer":            ["issue"],
     "startpage":         ["startpage", "start page"],
     "slutpage":          ["endpage", "end page"],
     "sidor":             ["pages"],
     "hostpublication":   ["hostpublication", "host publication"],
-    # Examensarbetesnivå för kalibrerad epistemisk poäng (Bg4)
+    # Examensarbetesnivå för kalibrerad epistemisk poäng
     "thesislevel":       ["thesislevel", "thesis level"],
 }
 
@@ -246,7 +246,7 @@ _TYP_FOREALDRATYP: dict[str, str] = {
 }
 
 # Blocklista: DiVA-poster som returneras som fallback vid noll verkliga träffar.
-# Värden verifierade 2026-05-18 (audit Bg6): BTH-konferenspapper med CELEX-liknande ID.
+# Verifierade mot DiVA: BTH-konferenspapper med CELEX-liknande ID.
 # Utöka via DIVA_FILLER_IDS-miljövariabel (kommaseparerad) vid behov.
 _extra_filler = {
     s.strip()
@@ -371,7 +371,7 @@ def _berakna_epistemisk_status(
 
     examensarbete_niva: "grund" ger EPISTEMISK_EXAMENSARBETE_GRUND (default 1),
                         "" eller "avancerad" ger EPISTEMISK_EXAMENSARBETE_AVANCERAD
-                        (default 2). Hämtas ur ThesisLevel-kolumnen (Bg4).
+                        (default 2). Hämtas ur ThesisLevel-kolumnen.
     """
     if publikationstyp == "studentThesis" and examensarbete_niva == "grund":
         grundpong = int(os.getenv("EPISTEMISK_EXAMENSARBETE_GRUND", "1"))
@@ -444,7 +444,7 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     elif "/" in diva_id:
         diva_id = diva_id.rstrip("/").split("/")[-1]
 
-    # Filtrera bort kända filler-poster (modulnivå-konstant, Bg6)
+    # Filtrera bort kända filler-poster
     if diva_id in _KANDA_FILLER_IDS:
         return None
 
@@ -474,7 +474,7 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     if ar is not None and ar < 1000:
         return None
 
-    # Examensarbetesnivå — avgör om grundnivå eller avancerad (Bg4)
+    # Examensarbetesnivå — avgör om grundnivå eller avancerad
     thesislevel        = _val(rad, rubrikindex, "thesislevel").lower()
     examensarbete_niva = ""
     if publikationstyp == "studentThesis":
@@ -492,7 +492,7 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
     )
 
     # Lärosäte: extraheras ur Name-fältet eftersom DiVA:s CSV saknar
-    # en separat organisations-kolumn (Bugg 3)
+    # en separat organisations-kolumn
     forfattare_raw = _val(rad, rubrikindex, "forfattare")
     laerosate = _extrahera_laerosate(forfattare_raw)
 
@@ -513,7 +513,7 @@ def _normalisera_rad(rad: dict, rubrikindex: dict) -> dict | None:
         "urn":               urn,
         "isbn":              _val(rad, rubrikindex, "isbn"),
         "foerlag":           _val(rad, rubrikindex, "foerlag"),
-        # Citationsfält (Bg3)
+        # Citationsfält
         "volym":             _val(rad, rubrikindex, "volym"),
         "nummer":            _val(rad, rubrikindex, "nummer"),
         "sidor":             _val(rad, rubrikindex, "sidor"),
