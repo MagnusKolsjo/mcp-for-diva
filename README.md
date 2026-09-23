@@ -57,13 +57,17 @@ pip install -r requirements.txt
 cp config.example.env .env
 ```
 
-Redigera `.env` och ange databasanslutning. PostgreSQL rekommenderas:
+Redigera `.env` och välj lagringsbackend för fulltextcachen. PostgreSQL och
+SQLite är likvärdiga val: PostgreSQL ger ett eget schema och klarar samtidiga
+skrivningar från flera processer; SQLite är en lokal fil utan serverinstallation.
+
+PostgreSQL:
 
 ```env
-DATABASE_URL=postgresql://anvandare:losenord@localhost:5432/databas
+DATABASE_URL=postgresql://<ANVÄNDARE>:<LÖSENORD>@localhost:5432/<DATABASNAMN>
 ```
 
-SQLite-backend (välj vid installation):
+SQLite:
 
 ```env
 DATABASE_URL=sqlite:///diva_cache.db

@@ -23,6 +23,8 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
   strängar (tomma när DiVA:s CSV saknar värdet); bara `ar` kan vara `null`.
 - Alla verktyg har titel och annotationer (läsande, öppen värld).
 - `diva_sok` söker kommaseparerade termer parallellt, högst fyra åt gången.
+- README och konfigurationsmallen beskriver PostgreSQL och SQLite som likvärdiga
+  val i stället för att rekommendera PostgreSQL.
 - `diva_hamta_fulltext` returnerar den extraherade texten även när den inte
   kunde sparas i cachen; felet loggas och nästa anrop hämtar PDF:en på nytt.
 
@@ -60,6 +62,8 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 ### Borttaget
 
 - SSE-transporten och den egna Starlette-appen för http-läget.
+- De oanvända beroendena `requests` och `beautifulsoup4` ur `requirements.txt`.
+- Oanvända hjälpfunktioner för relevansfiltrering och söktyp.
 
 ## [1.2.0] — 2026-08-10
 

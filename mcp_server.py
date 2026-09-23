@@ -263,17 +263,6 @@ _KANDA_FILLER_IDS: frozenset[str] = frozenset(
     {"diva2:833794", "diva2:837011"} | _extra_filler
 )
 
-# Stoppord som inte bidrar till relevansbedömning
-_STOPPORD: frozenset[str] = frozenset({
-    "i", "och", "av", "för", "till", "med", "på", "den", "det", "en", "ett",
-    "de", "om", "är", "som", "att", "men", "har", "inte", "vi", "du", "han",
-    "hon", "ni", "dem", "sig", "sin", "sitt", "sina", "inom", "under", "samt",
-    "vid", "från", "kan", "mot", "över", "efter", "ut", "upp", "ner", "när",
-    "of", "the", "a", "an", "and", "in", "to", "for", "on", "at", "by",
-    "with", "from", "or", "not", "it", "is", "be", "as", "are", "its",
-    "this", "that", "which", "have", "has", "had", "was", "were",
-})
-
 # ── Hjälpfunktioner för kolumnhantering ──────────────────────────────────────
 
 def _typ_for_filter(intern_typ: str) -> str:
@@ -325,43 +314,6 @@ def _formatera_enkel_sokterm(term: str) -> str:
     Ociterade termer skickas as-is (implicit AND — alla ord måste finnas).
     """
     return term.strip()
-
-
-def _ar_relevant_for_term(post: dict, sokterm: str) -> bool:
-    """
-    Kontrollerar att posten innehåller minst ett signifikant ord från söktermen.
-    Filtrerar bort DiVA:s filler-poster vid noll verkliga träffar.
-    """
-    sookord = [
-        o.lower()
-        for o in sokterm.split()
-        if len(o) > 2 and o.lower() not in _STOPPORD
-    ]
-    if not sookord:
-        return True
-
-    text = " ".join(filter(None, [
-        post.get("titel", ""),
-        post.get("abstract", ""),
-        post.get("nyckelord", ""),
-        post.get("amne", ""),
-    ])).lower()
-
-    return any(ord_ in text for ord_ in sookord)
-
-
-def _bestam_soktyp(publikationstyper: list[str]) -> str:
-    """Bestämmer DiVA searchtype baserat på begärda publikationstyper."""
-    if not publikationstyper:
-        return "all"
-    undergraduate_typer = {"studentthesis", "examensarbete", "undergraduate"}
-    har_undergraduate = any(p.lower() in undergraduate_typer for p in publikationstyper)
-    har_postgraduate  = any(p.lower() not in undergraduate_typer for p in publikationstyper)
-    if har_undergraduate and not har_postgraduate:
-        return "undergraduate"
-    if har_postgraduate and not har_undergraduate:
-        return "postgraduate"
-    return "all"
 
 # ── Epistemisk status ─────────────────────────────────────────────────────────
 
