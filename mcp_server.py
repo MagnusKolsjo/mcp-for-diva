@@ -98,8 +98,14 @@ _logg = logging.getLogger("diva")
 
 # Standardtak för fulltext i diva_hamta_fulltext. Avhandlingar kan vara över en
 # miljon tecken och överskrida MCP-protokollets storleksgräns, vilket får anropet
-# att misslyckas helt. Anroparen kan höja taket eller sätta 0 för hela texten.
-DIVA_MAX_TECKEN = int(os.getenv("DIVA_MAX_TECKEN", "60000"))
+# att misslyckas helt. Anroparen kan höja taket upp till DIVA_MAX_TECKEN_TAK.
+#
+# Övre taket gäller alltid, även för max_tecken=0: svaret skickas både som
+# JSON-text och som structuredContent, så 300 000 tecken blir omkring 650 KB —
+# under klienternas gräns på ungefär 1 MB. Längre texter läses i delar med
+# fran_tecken.
+DIVA_MAX_TECKEN_TAK = 300_000
+DIVA_MAX_TECKEN = min(int(os.getenv("DIVA_MAX_TECKEN", "60000")), DIVA_MAX_TECKEN_TAK)
 
 # ── Utdata från C-bibliotek ───────────────────────────────────────────────────
 #
@@ -894,6 +900,8 @@ class Fulltext(TypedDict):
     tecken_visade: int
     trunkerad: bool
     fortsatt_fran_tecken: int | None
+    las_vidare: NotRequired[str]
+    meddelande: NotRequired[str]
 
 
 class Relaterade(TypedDict):
@@ -1193,6 +1201,10 @@ def _skar_ut(text, max_tecken: int, fran_tecken: int = 0) -> dict:
 
     Trunkering utan markering är ett tyst datafel — svaret ser ut att vara hela
     innehållet. max_tecken <= 0 betyder ingen trunkering. Klipper på ordgräns.
+
+    fortsatt_fran_tecken är utdragets faktiska slut, inte fran_tecken +
+    max_tecken: kapningen på ordgräns gör utdraget kortare än max_tecken, och
+    på varandra följande utdrag ska tillsammans bli exakt hela texten.
     """
     text   = text or ""
     totalt = len(text)
@@ -1204,7 +1216,9 @@ def _skar_ut(text, max_tecken: int, fran_tecken: int = 0) -> dict:
         brytpunkt = max(utdrag.rfind(" "), utdrag.rfind("\n"))
         if brytpunkt > max_tecken * 0.6:
             utdrag = utdrag[:brytpunkt]
-        utdrag    = utdrag.rstrip()
+        # Ett utdrag av bara blanktecken skulle ge slut == start, och
+        # läs-vidare-positionen skulle då peka på samma ställe igen.
+        utdrag    = utdrag.rstrip() or rest[:max_tecken]
         trunkerad = True
     else:
         utdrag    = rest
@@ -1221,8 +1235,10 @@ def _skar_ut(text, max_tecken: int, fran_tecken: int = 0) -> dict:
 
 
 def _fulltext_svar(diva_id: str, kalla: str, text: str, max_tecken: int, fran_tecken: int) -> Fulltext:
-    utdrag = _skar_ut(text, max_tecken, fran_tecken)
-    return {
+    begransad = max_tecken <= 0 or max_tecken > DIVA_MAX_TECKEN_TAK
+    effektiv  = DIVA_MAX_TECKEN_TAK if begransad else max_tecken
+    utdrag = _skar_ut(text, effektiv, fran_tecken)
+    svar: Fulltext = {
         "diva_id":              diva_id,
         "kalla":                kalla,
         "fulltext_md":          utdrag["text"],
@@ -1231,15 +1247,27 @@ def _fulltext_svar(diva_id: str, kalla: str, text: str, max_tecken: int, fran_te
         "trunkerad":            utdrag["trunkerad"],
         "fortsatt_fran_tecken": utdrag["fortsatt_fran_tecken"],
     }
+    if utdrag["fortsatt_fran_tecken"] is not None:
+        svar["las_vidare"] = (
+            f'diva_hamta_fulltext(diva_id="{diva_id}", max_tecken={max_tecken}, '
+            f'fran_tecken={utdrag["fortsatt_fran_tecken"]})'
+        )
+    if begransad and utdrag["trunkerad"]:
+        svar["meddelande"] = (
+            f"Ett svar rymmer högst {DIVA_MAX_TECKEN_TAK} tecken fulltext. "
+            "Läs resten i delar med las_vidare; utdragen blir tillsammans exakt "
+            "hela texten."
+        )
+    return svar
 
 
 @mcp.tool(title="Hämta fulltext från DiVA", annotations=LASNING_EXTERN)
 def diva_hamta_fulltext(
     diva_id: Annotated[str, Field(description="DiVA-id, t.ex. 'diva2:123456'.")],
     max_tecken: Annotated[int, Field(description=(
-        "Teckentak för fulltexten (standard 60 000, 0 = hela texten). "
-        "Avhandlingar kan vara över en miljon tecken; utan tak "
-        "misslyckas anropet mot svarsgränsen."
+        "Teckentak för fulltexten (standard 60 000, högst 300 000; 0 = "
+        "största tillåtna utdrag). Avhandlingar kan vara över en miljon "
+        "tecken; läs då vidare i delar med fran_tecken."
     ))] = DIVA_MAX_TECKEN,
     fran_tecken: Annotated[int, Field(
         description="Börja texten vid denna teckenposition — för att läsa vidare.",

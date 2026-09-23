@@ -45,6 +45,13 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
   `utelamnade_poster` och ett `meddelande` om hur sökningen kan snävas in.
   De lägst rankade posterna utelämnas först. `diva_hamta_post` ger alltid hela
   posten. `max_traffar` betyder som förut högsta antal träffar.
+- `diva_hamta_fulltext` med `max_tecken=0` gav hela texten, för den största
+  avhandlingen omkring 2,4 MB med `structuredContent`. Ett svar rymmer nu högst
+  300 000 tecken (cirka 650 KB); `max_tecken=0` eller ett högre värde ger
+  största tillåtna utdrag, och ett `meddelande` säger att resten läses i delar.
+  Ett kapat svar bär `las_vidare`, det fullständiga anropet för nästa del med
+  `fran_tecken` på utdragets faktiska slut, så att delarna tillsammans blir
+  exakt hela texten. `DIVA_MAX_TECKEN` begränsas till samma tak.
 - En sökning där anropen för alla termer misslyckades redovisades som noll
   träffar. Den ger nu ett felsvar med orsaken.
 - Samtidiga fulltextanrop kunde skriva över varandras tillfälliga PDF-fil och

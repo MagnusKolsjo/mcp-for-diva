@@ -127,11 +127,22 @@ MCP-protokollet har en övre storleksgräns per svar. Den största cachade poste
 
 | Parameter | Innebörd |
 |---|---|
-| `max_tecken` | Teckentak för texten. Standard 60 000 tecken; `0` ger hela texten som ett uttryckligt val. |
+| `max_tecken` | Teckentak för texten. Standard 60 000 tecken, högst 300 000; `0` ger största tillåtna utdrag. |
 | `fran_tecken` | Börja vid denna teckenposition — för att läsa vidare där ett kapat svar slutade. |
 
-Ett kapat svar säger alltid ifrån med fälten `trunkerad`, `tecken_totalt`, `tecken_visade` och `fortsatt_fran_tecken`. Kapningen sker på ordgräns, aldrig mitt i
-ett ord.
+Ett svar rymmer högst 300 000 tecken fulltext, eftersom svaret skickas både som
+JSON-text och som `structuredContent` och måste hålla sig under klienternas
+gräns på ungefär 1 MB. Längre texter läses i delar.
+
+Ett kapat svar säger alltid ifrån med fälten `trunkerad`, `tecken_totalt`,
+`tecken_visade` och `fortsatt_fran_tecken`, samt `las_vidare` med det
+fullständiga anropet för nästa del. Kapningen sker på ordgräns, aldrig mitt i
+ett ord, och `fortsatt_fran_tecken` pekar på utdragets faktiska slut — delarna
+blir tillsammans exakt hela texten.
+
+I träfflistorna från `diva_sok` och `diva_relaterade` kortas abstracts till
+cirka 600 tecken (`abstract_kapad`), och en lång lista kapas med `trunkerad`
+och `utelamnade_poster`. `diva_hamta_post` ger alltid hela posten.
 
 **Vid ordagranna citat:** citera aldrig ur ett svar som är markerat som kapat.
 Läs vidare med `fran_tecken` tills hela passagen är hämtad. Standardvärdet kan
