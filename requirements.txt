@@ -1,5 +1,5 @@
 # Basuppsättning
-mcp>=1.0
+mcp>=2.0,<3
 psycopg2-binary>=2.9
 python-dotenv>=1.0
 requests>=2.31
@@ -10,7 +10,7 @@ beautifulsoup4>=4.12
 pymupdf>=1.24
 pymupdf4llm>=0.0.17
 
-# HTTP-transport (valfritt)
+# HTTP-transport (ingår i mcp 2.x, listas för tydlighet)
 starlette>=0.38
 uvicorn>=0.30
 

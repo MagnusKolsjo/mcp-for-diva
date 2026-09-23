@@ -3,6 +3,48 @@
 Formatet följer [Keep a Changelog](https://keepachangelog.com/sv/1.0.0/).
 Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
+## [Unreleased]
+
+### Ändrat
+
+- **Brytande:** servern kräver `mcp>=2.0,<3` och är skriven med `MCPServer`
+  och `@mcp.tool()`. Verktygsnamn, parametrar, obligatoriska fält och
+  beskrivningar är oförändrade.
+- **Brytande:** förväntade fel returneras som felsvar (`isError`) med ett
+  meddelande på svenska, i stället för som ett lyckat svar med fältet `fel`.
+  Det gäller bland annat okänt `diva_id`, okänt lärosäte, saknad öppen
+  fulltext och att DiVA inte svarar.
+- **Brytande:** http-läget kräver `MCP_API_KEY` och avbryter uppstarten med
+  exitkod 2 utan den. Anrop utan `Authorization`-header ger 401, fel nyckel 403.
+- **Brytande:** http-läget kör Streamable HTTP på `/mcp`. SSE-transporten
+  (`/sse`) är borttagen.
+- Svaren är typade: varje verktyg har `outputSchema`, och klienten får
+  `structuredContent` utöver JSON-texten. Textfälten i en post är alltid
+  strängar (tomma när DiVA:s CSV saknar värdet); bara `ar` kan vara `null`.
+- Alla verktyg har titel och annotationer (läsande, öppen värld).
+- `diva_sok` söker kommaseparerade termer parallellt, högst fyra åt gången.
+- `diva_hamta_fulltext` returnerar den extraherade texten även när den inte
+  kunde sparas i cachen; felet loggas och nästa anrop hämtar PDF:en på nytt.
+
+### Tillagt
+
+- Ett svar från export.jsf som inte är den väntade CSV-exporten — HTML i
+  stället för CSV, tomt svar, HTTP 404/410 eller en CSV utan kolumnerna `PID`
+  och `Title` — ger ett fel som säger att källan kan ha bytt plattform, i
+  stället för tomma träffar eller ett tolkningsfel.
+- `diva_sok` redovisar termer vars anrop misslyckades i `misslyckade_termer`.
+
+### Fixat
+
+- En sökning där anropen för alla termer misslyckades redovisades som noll
+  träffar. Den ger nu ett felsvar med orsaken.
+- Samtidiga fulltextanrop kunde skriva över varandras tillfälliga PDF-fil och
+  återställa processens fil 1 och 2 i fel ordning.
+
+### Borttaget
+
+- SSE-transporten och den egna Starlette-appen för http-läget.
+
 ## [1.2.0] — 2026-08-10
 
 ### Tillagt

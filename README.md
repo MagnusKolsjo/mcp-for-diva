@@ -17,9 +17,26 @@ Varje sökträff inkluderar metadata, abstract och ett **epistemisk status**-fä
 | `diva_hamta_fulltext` | On-demand PDF-extraktion med lokal cache |
 | `diva_relaterade` | Relaterade poster via författare, ämne eller organisation |
 
+Alla verktyg är läsande (`readOnlyHint`) och har titel. Svaren är typade:
+klienten får både JSON-text och `structuredContent` enligt verktygets
+`outputSchema`. Förväntade fel — okänt id, okänt lärosäte, ingen öppen
+fulltext, DiVA svarar inte — kommer som felsvar (`isError`) med ett
+meddelande på svenska.
+
+## Källa: DiVA:s export.jsf
+
+Servern hämtar all metadata ur DiVA:s CSV-export,
+`https://www.diva-portal.org/smash/export.jsf` i formatet `csvall2`. Det finns
+inget annat stöd för sökning eller uppslag. Svarar export.jsf med något annat
+än den väntade CSV-exporten — en HTML-sida, ett tomt svar, HTTP 404/410 eller
+en CSV utan kolumnerna `PID` och `Title` — ger verktygen ett fel som säger att
+källan kan ha bytt plattform, i stället för tomma träffar. Servern behöver då
+anpassas till DiVA:s nya gränssnitt.
+
 ## Krav
 
 - Python 3.10+
+- `mcp` 2.x (`mcp>=2.0,<3`, se `requirements.txt`)
 - `pymupdf4llm` för fulltextextraktion (valfritt)
 - PostgreSQL med pgvector eller SQLite (se konfiguration)
 - Tesseract för OCR-fallback (valfritt): `brew install tesseract tesseract-lang`
@@ -64,15 +81,20 @@ Exempel för Claude Desktop (`claude_desktop_config.json`):
 }
 ```
 
-### 4. HTTP-transport (hostad driftsättning)
+### 4. HTTP-transport (delad drift)
 
-Sätt `MCP_TRANSPORT=http` i `.env` och generera en API-nyckel:
+stdio passar en lokal MCP-klient; http passar delad drift bakom en reverse
+proxy. Sätt `MCP_TRANSPORT=http` i `.env` och generera en API-nyckel:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Ange nyckeln i `MCP_API_KEY`. Servern lyssnar på `MCP_HOST:MCP_PORT`.
+Ange nyckeln i `MCP_API_KEY`. Nyckeln är obligatorisk: utan den avbryts
+uppstarten i http-läget med exitkod 2. Servern kör Streamable HTTP på
+`http://MCP_HOST:MCP_PORT/mcp` (standard `127.0.0.1:8015`), och varje anrop
+måste bära `Authorization: Bearer <nyckel>` — utan header svarar servern 401,
+med fel nyckel 403. SSE-transporten finns inte längre.
 
 ## Flerspråkig sökning
 
