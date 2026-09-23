@@ -101,11 +101,27 @@ _logg = logging.getLogger("diva")
 # att misslyckas helt. Anroparen kan höja taket eller sätta 0 för hela texten.
 DIVA_MAX_TECKEN = int(os.getenv("DIVA_MAX_TECKEN", "60000"))
 
-# ── FD1-skydd (MCP-stdio-hygien) ──────────────────────────────────────────────
+# ── Utdata från C-bibliotek ───────────────────────────────────────────────────
+#
+# MuPDF och Tesseract skriver varningar direkt till fil 1 och 2, förbi Pythons
+# sys.stdout. MCP-transporten skyddar själv sin kanal i stdio-läget, men
+# utskrifterna hör hemma i loggen och inte i klientens stderr.
+#
+# Omdirigeringen gäller hela processen. Verktygen körs på arbetstrådar, så två
+# samtidiga extraktioner skulle annars kunna återställa varandras
+# fildeskriptorer i fel ordning. Låset gör omdirigeringen till en i taget.
+_FD_LAS = threading.Lock()
+
 
 @contextlib.contextmanager
 def _tysta_fd1():
     """Omdirigerar FD 1+2 till loggfil under anrop som kan skriva till stdout."""
+    with _FD_LAS, _omdirigera_fd1_och_fd2():
+        yield
+
+
+@contextlib.contextmanager
+def _omdirigera_fd1_och_fd2():
     loggfil = _LOGG_DIR / "subprocess.log"
     spar_ut  = os.dup(1)
     spar_fel = os.dup(2)
@@ -676,7 +692,13 @@ def _hamta_pdf_fulltext(diva_id: str, fulltext_url: str, urn: str = "") -> str:
     if not fulltext_url:
         raise ToolError(f"Ingen fulltextlänk tillgänglig för {diva_id}")
 
-    pdf_fil = _PDF_CACHE / f"{re.sub(r'[:/]', '_', diva_id)}.pdf"
+    # Unikt filnamn per anrop: två samtidiga anrop för samma post ska inte
+    # skriva i och radera varandras fil.
+    fd, sokvag = tempfile.mkstemp(
+        prefix=f"{re.sub(r'[:/]', '_', diva_id)}-", suffix=".pdf", dir=_PDF_CACHE
+    )
+    os.close(fd)
+    pdf_fil = Path(sokvag)
 
     try:
         with httpx.stream(
