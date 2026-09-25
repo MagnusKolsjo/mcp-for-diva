@@ -26,7 +26,8 @@ Miljövariabler (prefixet sätts av anroparen, t.ex. "GOV" → GOV_OCR_SPRAK):
     <PREFIX>_OCR_KO_MAPP      mapp för OCR-kön (standard: ocr_ko/ bredvid modulen)
 
 Ingångspunkt:
-    extrahera_pdf(pdf, *, prefix, standardsprak, kalla_id, kalla_url="") -> PdfResultat
+    extrahera_pdf(pdf, *, prefix, standardsprak, kalla_id, kalla_url="",
+                  sidor=None) -> PdfResultat
 
 Barnprocesserna startas med "spawn", som läser in anroparens huvudmodul på
 nytt. Kod på översta nivån i ett anropande skript måste därför ligga under
@@ -144,12 +145,16 @@ def _ren_text(sokvag: str, sidor: list[int]) -> str:
     return "\n\n".join(delar)
 
 
-def _sidor_utan_textlager(sokvag: str) -> tuple[int, list[int]]:
+def _sidor_utan_textlager(sokvag: str, sidlista: list[int] | None = None) -> tuple[int, list[int]]:
+    """Sidor utan textlager. Med sidlista begränsas kontrollen till dessa sidor."""
     import pymupdf
     utan = []
+    urval = set(sidlista) if sidlista is not None else None
     with pymupdf.open(sokvag) as dok:
         antal = dok.page_count
         for i, sida in enumerate(dok):
+            if urval is not None and i not in urval:
+                continue
             if not sida.get_text("text").strip() and sida.get_images(full=False):
                 utan.append(i)
     return antal, utan
@@ -182,13 +187,20 @@ def _lagg_i_ocr_ko(prefix: str, sokvag: str, kalla_id: str, kalla_url: str,
 
 
 def extrahera_pdf(pdf: bytes | str | Path, *, prefix: str, standardsprak: str,
-                  kalla_id: str, kalla_url: str = "") -> PdfResultat:
+                  kalla_id: str, kalla_url: str = "",
+                  sidor: list[int] | None = None) -> PdfResultat:
     """Extraherar en PDF till markdown under minnes- och tidsvakt.
 
     pdf: PDF:ens innehåll eller en sökväg till filen.
     prefix: miljövariablernas prefix för servern, t.ex. "GOV".
     standardsprak: Tesseract-språk om <PREFIX>_OCR_SPRAK saknas, t.ex. "swe+eng".
     kalla_id, kalla_url: identifierar dokumentet i OCR-kön.
+    sidor: valfri lista med sidnummer att begränsa extraktionen till, 0-indexerat
+        (samma indexering som pymupdf/pymupdf4llm, dvs. sida 1 i dokumentet är
+        index 0). Utelämna (None) för hela dokumentet. Sidor utanför dokumentets
+        längd ignoreras tyst. `PdfResultat.sidor` anger ändå dokumentets totala
+        sidantal, inte antalet begärda sidor — `sidor_utan_textlager` och
+        `block_med_reserv` avser bara de begärda sidorna.
     """
     sprak = _env(prefix, "OCR_SPRAK", standardsprak)
     max_minne = float(_env(prefix, "PDF_MAX_MINNE_MB", "3000"))
@@ -202,18 +214,23 @@ def extrahera_pdf(pdf: bytes | str | Path, *, prefix: str, standardsprak: str,
         else:
             sokvag = str(pdf)
 
-        antal, utan = _sidor_utan_textlager(sokvag)
+        antal, utan = _sidor_utan_textlager(sokvag, sidor)
+        if sidor is not None:
+            sidlista = sorted({i for i in dict.fromkeys(sidor) if 0 <= i < antal})
+        else:
+            sidlista = list(range(antal))
+
         delar: list[str] = []
         reserv: list[tuple[int, int]] = []
         orsaker: list[str] = []
-        for start in range(0, antal, blockstorlek):
-            sidor = list(range(start, min(start + blockstorlek, antal)))
-            md, orsak = _kor_block(sokvag, sidor, sprak, max_minne, tidsgrans)
+        for start in range(0, len(sidlista), blockstorlek):
+            block = sidlista[start:start + blockstorlek]
+            md, orsak = _kor_block(sokvag, block, sprak, max_minne, tidsgrans)
             if md is None:
                 logger.warning("Sidorna %d–%d i %s lästes med ren textutvinning: %s",
-                               sidor[0] + 1, sidor[-1] + 1, kalla_id, orsak)
-                md = _ren_text(sokvag, sidor)
-                reserv.append((sidor[0] + 1, sidor[-1] + 1))
+                               block[0] + 1, block[-1] + 1, kalla_id, orsak)
+                md = _ren_text(sokvag, block)
+                reserv.append((block[0] + 1, block[-1] + 1))
                 orsaker.append(orsak)
             delar.append(md)
 
