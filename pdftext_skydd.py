@@ -27,6 +27,10 @@ Miljövariabler (prefixet sätts av anroparen, t.ex. "GOV" → GOV_OCR_SPRAK):
 
 Ingångspunkt:
     extrahera_pdf(pdf, *, prefix, standardsprak, kalla_id, kalla_url="") -> PdfResultat
+
+Barnprocesserna startas med "spawn", som läser in anroparens huvudmodul på
+nytt. Kod på översta nivån i ett anropande skript måste därför ligga under
+`if __name__ == "__main__":`.
 """
 
 from __future__ import annotations
@@ -80,6 +84,14 @@ def _rss_mb(pid: int) -> float:
 
 def _block_arbetare(sokvag: str, sidor: list[int], sprak: str, ko: mp.Queue) -> None:
     """Körs i en egen process: layout + OCR för ett block sidor."""
+    # Processen ärver förälderns fd 1 och 2. pymupdf4llm och Tesseract skriver
+    # statusrader dit, och i en MCP-server över stdio är fd 1 protokollkanalen.
+    # Barnprocessens egna utskrifter skickas därför till /dev/null; resultatet
+    # går tillbaka via kön.
+    tom = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(tom, 1)
+    os.dup2(tom, 2)
+    os.close(tom)
     try:
         import pymupdf  # noqa: F401  (laddar biblioteket i barnprocessen)
         import pymupdf4llm
