@@ -152,6 +152,22 @@ och `utelamnade_poster`. `diva_hamta_post` ger alltid hela posten.
 Läs vidare med `fran_tecken` tills hela passagen är hämtad. Standardvärdet kan
 sättas i `.env` med `DIVA_MAX_TECKEN`.
 
+## PDF-extraktion, OCR-språk och OCR-kö
+
+Fulltext-PDF:er extraheras med `pdftext_skydd.py` (delad mall, se
+`verktyg/mcp-2x/mallar/`). Extraktionen körs i en egen process per sidblock;
+en vakt i föräldraprocessen avbryter blocket om det passerar minnes- eller
+tidsgränsen (standard 3000 MB / 300 s), och läser då sidorna med ren
+textutvinning i stället för att fälla processen.
+
+Sidor utan textlager OCR:as med `DIVA_OCR_SPRAK` (standard `swe+eng+fra+deu`)
+— utan det skulle pymupdf4llm falla tillbaka på engelska och svenska tecken
+bli fel. Dokument där minst en sida saknade textlager, eller där ett
+sidblock föll tillbaka på ren textutvinning, läggs i en OCR-kö:
+`ocr_ko/ko.jsonl` (en rad per dokument, med källa och orsak) och PDF-filen
+sparas i `ocr_ko/filer/`. Köade dokument kan köras genom en bättre OCR
+senare utan att laddas ned igen.
+
 ## Licens
 
 AGPLv3 — se [LICENSE](LICENSE).

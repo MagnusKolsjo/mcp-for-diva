@@ -17,7 +17,6 @@ Databas:   PostgreSQL eller SQLite (DATABASE_URL), se db.py.
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import io
 import json
@@ -25,7 +24,6 @@ import logging
 import os
 import re
 import tempfile
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
@@ -40,6 +38,7 @@ from typing_extensions import NotRequired, TypedDict
 import db
 from mcp_annotationer import CACHE_HINTAR, LASNING_EXTERN
 from mcp_transport import starta
+from pdftext_skydd import extrahera_pdf
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 
@@ -106,42 +105,6 @@ _logg = logging.getLogger("diva")
 # fran_tecken.
 DIVA_MAX_TECKEN_TAK = 300_000
 DIVA_MAX_TECKEN = min(int(os.getenv("DIVA_MAX_TECKEN", "60000")), DIVA_MAX_TECKEN_TAK)
-
-# ── Utdata från C-bibliotek ───────────────────────────────────────────────────
-#
-# MuPDF och Tesseract skriver varningar direkt till fil 1 och 2, förbi Pythons
-# sys.stdout. MCP-transporten skyddar själv sin kanal i stdio-läget, men
-# utskrifterna hör hemma i loggen och inte i klientens stderr.
-#
-# Omdirigeringen gäller hela processen. Verktygen körs på arbetstrådar, så två
-# samtidiga extraktioner skulle annars kunna återställa varandras
-# fildeskriptorer i fel ordning. Låset gör omdirigeringen till en i taget.
-_FD_LAS = threading.Lock()
-
-
-@contextlib.contextmanager
-def _tysta_fd1():
-    """Omdirigerar FD 1+2 till loggfil under anrop som kan skriva till stdout."""
-    with _FD_LAS, _omdirigera_fd1_och_fd2():
-        yield
-
-
-@contextlib.contextmanager
-def _omdirigera_fd1_och_fd2():
-    loggfil = _LOGG_DIR / "subprocess.log"
-    spar_ut  = os.dup(1)
-    spar_fel = os.dup(2)
-    fd = os.open(str(loggfil), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
-    try:
-        os.dup2(fd, 1)
-        os.dup2(fd, 2)
-        yield
-    finally:
-        os.dup2(spar_ut, 1)
-        os.dup2(spar_fel, 2)
-        os.close(spar_ut)
-        os.close(spar_fel)
-        os.close(fd)
 
 # ── DiVA API-konfiguration ────────────────────────────────────────────────────
 
@@ -640,8 +603,8 @@ def _hamta_diva_export(params: dict) -> list[dict]:
 
 def _hamta_pdf_fulltext(diva_id: str, fulltext_url: str, urn: str = "") -> str:
     """
-    Hämtar PDF och extraherar text med pymupdf4llm.
-    OCR-fallback via Tesseract om textlagret är tomt.
+    Hämtar PDF och extraherar text under minnes- och tidsvakt (pdftext_skydd).
+    Sidor utan textlager OCR:as med DIVA_OCR_SPRAK (standard swe+eng+fra+deu).
     Raderar PDF direkt efter lyckad extraktion (per TTL-principen).
     """
     if not fulltext_url and urn:
@@ -672,22 +635,9 @@ def _hamta_pdf_fulltext(diva_id: str, fulltext_url: str, urn: str = "") -> str:
         raise ToolError(f"PDF-nedladdning misslyckades för {diva_id}: {e}") from e
 
     try:
-        try:
-            import pymupdf4llm
-        except ImportError as imp_err:
-            raise ToolError(
-                "pymupdf4llm är inte installerat. Kör: pip install pymupdf4llm"
-            ) from imp_err
-
-        with _tysta_fd1():
-            text = pymupdf4llm.to_markdown(str(pdf_fil))
-
-        if not text or len(text.strip()) < 100:
-            _logg.info("Tomt textlager för %s — provar OCR", diva_id)
-            text = _ocr_pdf(pdf_fil)
-
-    except ToolError:
-        raise
+        res = extrahera_pdf(pdf_fil, prefix="DIVA", standardsprak="swe+eng+fra+deu",
+                            kalla_id=diva_id, kalla_url=fulltext_url)
+        text = res.text
     except Exception as e:
         _logg.error("Textextraktion misslyckades för %s: %s", diva_id, e)
         raise ToolError(f"Textextraktion misslyckades för {diva_id}: {e}") from e
@@ -695,35 +645,6 @@ def _hamta_pdf_fulltext(diva_id: str, fulltext_url: str, urn: str = "") -> str:
         pdf_fil.unlink(missing_ok=True)
 
     return text or ""
-
-
-def _ocr_pdf(pdf_fil: Path) -> str:
-    """OCR-fallback via ocrmypdf + pymupdf4llm."""
-    import pymupdf4llm
-
-    ocr_fil = pdf_fil.with_suffix(".ocr.pdf")
-    try:
-        try:
-            import ocrmypdf
-        except ImportError:
-            _logg.warning("ocrmypdf inte installerat — hoppar OCR-fallback")
-            return ""
-
-        with _tysta_fd1():
-            ocrmypdf.ocr(
-                str(pdf_fil), str(ocr_fil),
-                language="swe+eng+fra+deu",
-                skip_text=True,
-                progress_bar=False,
-            )
-        with _tysta_fd1():
-            text = pymupdf4llm.to_markdown(str(ocr_fil))
-        return text or ""
-    except Exception as e:
-        _logg.error("OCR misslyckades: %s", e)
-        return ""
-    finally:
-        ocr_fil.unlink(missing_ok=True)
 
 # ── Flerspråkig begreppsexpansion ─────────────────────────────────────────────
 

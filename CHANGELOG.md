@@ -5,6 +5,29 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
 ## [Unreleased]
 
+### Rättat
+
+- OCR-språket för sidor utan textlager var engelska (pymupdf4llms
+  standardvärde), eftersom ingen kod angav `ocr_language`. Svenska, franska
+  och tyska tecken i skannade sidor blev därför fel. `DIVA_OCR_SPRAK`
+  (standard `swe+eng+fra+deu`) styr nu språket explicit.
+
+### Tillagt
+
+- Minnes- och tidsvakt kring PDF-extraktionen (`pdftext_skydd.py`):
+  extraktionen körs i en egen process per sidblock, och ett block som
+  passerar minnes- eller tidsgränsen läses om med ren textutvinning i
+  stället för att fälla processen.
+- OCR-kö (`ocr_ko/ko.jsonl` + `ocr_ko/filer/`) för dokument där minst en
+  sida saknade textlager eller där ett block föll tillbaka på ren
+  textutvinning, så att de kan köras genom en bättre OCR senare.
+
+### Borttaget
+
+- `ocrmypdf`-reserven i `_ocr_pdf()`. Den har aldrig kunnat köras — `ocrmypdf`
+  är inte installerat — och pymupdf4llms egen sidvisa OCR (nu med rätt
+  språk) täcker samma fall.
+
 ### Ändrat
 
 - **Brytande:** servern kräver `mcp>=2.0,<3` och är skriven med `MCPServer`

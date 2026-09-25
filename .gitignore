@@ -2,6 +2,7 @@
 *.db
 *.db-journal
 pdf_cache/
+ocr_ko/
 logs/
 __pycache__/
 *.pyc
