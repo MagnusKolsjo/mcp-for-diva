@@ -75,7 +75,7 @@ DATABASE_URL=sqlite:///diva_cache.db
 
 ### 3. Konfigurera i MCP-klienten
 
-Exempel för Claude Desktop (`claude_desktop_config.json`):
+Exempel i formatet `mcpServers`, som flera MCP-klienter använder:
 
 ```json
 "diva": {

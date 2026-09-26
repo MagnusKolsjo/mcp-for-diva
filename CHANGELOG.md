@@ -40,6 +40,7 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
 ### Ändrat
 
+- Texterna är produktneutrala: README, konfigurationsexempel, kommentarer och äldre CHANGELOG-poster nämner MCP-klienten i stället för en viss klient.
 - User-Agent-strängen följer huvudversionen: `mcp-for-diva/2.0`.
 - **Brytande:** servern kräver `mcp>=2.0,<3` och är skriven med `MCPServer`
   och `@mcp.tool()`. Verktygsnamn, parametrar, obligatoriska fält och
