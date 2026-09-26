@@ -40,6 +40,7 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
 ### Ändrat
 
+- Frågeexpansion på serversidan har inget förvalt modellnamn. `QUERY_EXPANSION_MODEL` anges alltid i `.env` (platshållare `<modellnamn>` i `config.example.env`); saknas det hoppas expansionen över.
 - Texterna är produktneutrala: README, konfigurationsexempel, kommentarer och äldre CHANGELOG-poster nämner MCP-klienten i stället för en viss klient.
 - User-Agent-strängen följer huvudversionen: `mcp-for-diva/2.0`.
 - **Brytande:** servern kräver `mcp>=2.0,<3` och är skriven med `MCPServer`

@@ -58,7 +58,7 @@ PDF_CACHE_TTL_DAGAR = int(os.getenv("PDF_CACHE_TTL_DAGAR", "7"))
 QUERY_EXPANSION_ENABLED  = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
 QUERY_EXPANSION_API_URL  = os.getenv("QUERY_EXPANSION_API_URL", "")
 QUERY_EXPANSION_API_KEY  = os.getenv("QUERY_EXPANSION_API_KEY", "")
-QUERY_EXPANSION_MODEL    = os.getenv("QUERY_EXPANSION_MODEL", "claude-haiku-4-5-20251001")
+QUERY_EXPANSION_MODEL    = os.getenv("QUERY_EXPANSION_MODEL", "")
 
 # Epistemisk status — grundpoäng per publikationstyp (konfigurerbart via .env)
 _EPISTEMISK_GRUNDPONG: dict[str, int] = {
@@ -654,7 +654,7 @@ def _expandera_sokterm(sokterm: str) -> str:
     Returnerar kommaseparerad söksträng (samma format som indata).
     Expansion sker bara om QUERY_EXPANSION_ENABLED=true i .env.
     """
-    if not QUERY_EXPANSION_ENABLED or not QUERY_EXPANSION_API_URL:
+    if not QUERY_EXPANSION_ENABLED or not QUERY_EXPANSION_API_URL or not QUERY_EXPANSION_MODEL:
         return sokterm
 
     prompt_fil = _SCRIPT_DIR / "prompts" / "expansion_prompt.txt"
