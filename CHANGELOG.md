@@ -5,6 +5,8 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-09-26
+
 ### Rättat
 
 - OCR-språket för sidor utan textlager var engelska (pymupdf4llms
@@ -21,15 +23,24 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
 - OCR-kö (`ocr_ko/ko.jsonl` + `ocr_ko/filer/`) för dokument där minst en
   sida saknade textlager eller där ett block föll tillbaka på ren
   textutvinning, så att de kan köras genom en bättre OCR senare.
+- Ett svar från export.jsf som inte är den väntade CSV-exporten — HTML i
+  stället för CSV, tomt svar, HTTP 404/410 eller en CSV utan kolumnerna `PID`
+  och `Title` — ger ett fel som säger att källan kan ha bytt plattform, i
+  stället för tomma träffar eller ett tolkningsfel.
+- `diva_sok` redovisar termer vars anrop misslyckades i `misslyckade_termer`.
 
 ### Borttaget
 
 - `ocrmypdf`-reserven i `_ocr_pdf()`. Den har aldrig kunnat köras — `ocrmypdf`
   är inte installerat — och pymupdf4llms egen sidvisa OCR (nu med rätt
   språk) täcker samma fall.
+- SSE-transporten och den egna Starlette-appen för http-läget.
+- De oanvända beroendena `requests` och `beautifulsoup4` ur `requirements.txt`.
+- Oanvända hjälpfunktioner för relevansfiltrering och söktyp.
 
 ### Ändrat
 
+- User-Agent-strängen följer huvudversionen: `mcp-for-diva/2.0`.
 - **Brytande:** servern kräver `mcp>=2.0,<3` och är skriven med `MCPServer`
   och `@mcp.tool()`. Verktygsnamn, parametrar, obligatoriska fält och
   beskrivningar är oförändrade.
@@ -50,14 +61,6 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
   val i stället för att rekommendera PostgreSQL.
 - `diva_hamta_fulltext` returnerar den extraherade texten även när den inte
   kunde sparas i cachen; felet loggas och nästa anrop hämtar PDF:en på nytt.
-
-### Tillagt
-
-- Ett svar från export.jsf som inte är den väntade CSV-exporten — HTML i
-  stället för CSV, tomt svar, HTTP 404/410 eller en CSV utan kolumnerna `PID`
-  och `Title` — ger ett fel som säger att källan kan ha bytt plattform, i
-  stället för tomma träffar eller ett tolkningsfel.
-- `diva_sok` redovisar termer vars anrop misslyckades i `misslyckade_termer`.
 
 ### Fixat
 
@@ -81,12 +84,6 @@ Versionshanteringen följer [Semantic Versioning](https://semver.org/lang/sv/).
   träffar. Den ger nu ett felsvar med orsaken.
 - Samtidiga fulltextanrop kunde skriva över varandras tillfälliga PDF-fil och
   återställa processens fil 1 och 2 i fel ordning.
-
-### Borttaget
-
-- SSE-transporten och den egna Starlette-appen för http-läget.
-- De oanvända beroendena `requests` och `beautifulsoup4` ur `requirements.txt`.
-- Oanvända hjälpfunktioner för relevansfiltrering och söktyp.
 
 ## [1.2.0] — 2026-08-10
 

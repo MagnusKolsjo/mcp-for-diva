@@ -43,7 +43,7 @@ from pdftext_skydd import extrahera_pdf
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 
 # Senaste släppta version enligt CHANGELOG.md.
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "2.0.0"
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 load_dotenv(_SCRIPT_DIR / ".env")
@@ -110,7 +110,7 @@ DIVA_MAX_TECKEN = min(int(os.getenv("DIVA_MAX_TECKEN", "60000")), DIVA_MAX_TECKE
 
 _DIVA_EXPORT_URL = "https://www.diva-portal.org/smash/export.jsf"
 _DIVA_HUVUDEN = {
-    "User-Agent": "mcp-for-diva/1.0 (+https://github.com/MagnusKolsjo/mcp-for-diva)",
+    "User-Agent": "mcp-for-diva/2.0 (+https://github.com/MagnusKolsjo/mcp-for-diva)",
     "Accept":     "text/csv,text/plain,*/*",
     "Referer":    "https://www.diva-portal.org/",
 }
